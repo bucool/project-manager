@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/app-icon.png" width="80" alt="Project Manager"></p>
 <h1 align="center">Project Manager</h1>
-<p align="center"><a href="README.zh-CN.md">简体中文</a> · <a href="https://github.com/StephenPudding/project-manager/releases/latest">Download</a></p>
+<p align="center"><a href="README.zh-CN.md">简体中文</a> · <a href="https://github.com/bucool/project-manager/releases/latest">Download</a></p>
 
 A native Windows app for managing local web projects, tools, and games. Browse cached previews, organize multiple project folders, install dependencies, start or stop development servers, and inspect errors from one workspace.
 
@@ -12,14 +12,14 @@ Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Ru
 
 ## Download
 
-Download the Windows x64 portable ZIP from [Releases](https://github.com/StephenPudding/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface follows your Windows display language: Chinese for Chinese systems, English otherwise.
+Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface follows your Windows display language: Chinese for Chinese systems, English otherwise.
 
 ## Build
 
 Requirements: Windows 10/11 x64, stable Rust MSVC, Visual Studio C++ Build Tools with Windows SDK, Node.js 20+, and WebView2 Runtime for previews.
 
 ```powershell
-git clone https://github.com/StephenPudding/project-manager.git
+git clone https://github.com/bucool/project-manager.git
 cd project-manager
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1 -Release
 .\target\release\project-manager.exe

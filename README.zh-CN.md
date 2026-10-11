@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/app-icon.png" width="80" alt="Project Manager"></p>
 <h1 align="center">Project Manager</h1>
-<p align="center"><a href="README.md">English</a> · <a href="https://github.com/StephenPudding/project-manager/releases/latest">下载软件</a></p>
+<p align="center"><a href="README.md">English</a> · <a href="https://github.com/bucool/project-manager/releases/latest">下载软件</a></p>
 
 Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、工具和游戏，管理多个项目文件夹，安装依赖、运行或停止开发服务、查看报错。
 
@@ -12,14 +12,14 @@ Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、
 
 ## 下载
 
-从 [Releases](https://github.com/StephenPudding/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面自动跟随 Windows 显示语言：中文系统使用中文，其他语言使用英文。
+从 [Releases](https://github.com/bucool/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面自动跟随 Windows 显示语言：中文系统使用中文，其他语言使用英文。
 
 ## 构建
 
 环境要求：Windows 10/11 x64、稳定版 Rust MSVC、带 Windows SDK 的 Visual Studio C++ Build Tools、Node.js 20+；截图需要 WebView2 Runtime。
 
 ```powershell
-git clone https://github.com/StephenPudding/project-manager.git
+git clone https://github.com/bucool/project-manager.git
 cd project-manager
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1 -Release
 .\target\release\project-manager.exe

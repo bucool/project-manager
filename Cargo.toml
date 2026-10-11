@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Native GPUI workbench for local projects"
 license = "MIT"
-repository = "https://github.com/StephenPudding/project-manager"
+repository = "https://github.com/bucool/project-manager"
 publish = false
 
 [[bin]]
