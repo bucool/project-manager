@@ -4,6 +4,8 @@ mod backend;
 mod dev_servers;
 mod i18n;
 mod preview_cache;
+#[cfg(windows)]
+mod single_instance;
 mod smooth_scroll;
 mod storage;
 mod theme;
@@ -24,11 +26,19 @@ fn main() {
         }
         return;
     }
+    #[cfg(windows)]
+    let Some(instance) = single_instance::SingleInstance::acquire()
+        .expect("Unable to initialize single-instance handling")
+    else {
+        return;
+    };
     i18n::set_language(storage::load_language());
     let (backend, events) = backend::Backend::start();
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx| {
+            #[cfg(windows)]
+            cx.set_global(instance);
             gpui_component::init(cx);
             gpui_component::set_locale(if i18n::english() { "en" } else { "zh-CN" });
             Theme::change(ThemeMode::Light, None, cx);
@@ -65,7 +75,11 @@ fn main() {
                 },
                 |window, cx| {
                     #[cfg(windows)]
-                    tray::init(window, cx);
+                    {
+                        tray::init(window, cx);
+                        single_instance::SingleInstance::connect(window, cx)
+                            .expect("Unable to listen for application activation");
+                    }
                     let view = cx.new(|cx| Workbench::new(backend, events, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 },

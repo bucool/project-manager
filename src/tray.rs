@@ -13,7 +13,7 @@ use windows::{
     core::{HSTRING, PCWSTR, w},
 };
 
-const CLASS_NAME: PCWSTR = w!("ProjectManagerTray");
+pub(crate) const CLASS_NAME: PCWSTR = w!("ProjectManagerTray");
 const CALLBACK_MESSAGE: u32 = WM_APP + 1;
 
 enum Action {
@@ -29,32 +29,17 @@ impl Global for Tray {}
 
 pub fn init(window: &Window, cx: &mut App) {
     let (events, receiver) = async_channel::unbounded();
-    cx.set_global(Tray {
-        events,
-        native: None,
-    });
+    // Keep a hidden native window available for secondary launches to identify
+    // this process. A tray icon is still added only when the user hides the app.
+    let native = NativeTray::new(events.clone()).ok();
+    cx.set_global(Tray { events, native });
     let handle = window.window_handle();
     cx.spawn(async move |cx| {
         while let Ok(action) = receiver.recv().await {
             match action {
                 Action::Show => {
                     let _ = handle.update(cx, |_, window, cx| {
-                        if let Ok(hwnd) = window_handle(window) {
-                            unsafe {
-                                // SW_SHOW preserves a maximized window; only restore minimized ones.
-                                let mode = if IsIconic(hwnd).as_bool() {
-                                    SW_RESTORE
-                                } else {
-                                    SW_SHOW
-                                };
-                                let _ = ShowWindow(hwnd, mode);
-                                let _ = SetForegroundWindow(hwnd);
-                            }
-                            if let Some(native) = &cx.global::<Tray>().native {
-                                native.state.remove();
-                            }
-                            window.refresh();
-                        }
+                        show(window, cx);
                     });
                 }
                 Action::Exit => {
@@ -68,6 +53,25 @@ pub fn init(window: &Window, cx: &mut App) {
         }
     })
     .detach();
+}
+
+pub fn show(window: &mut Window, cx: &mut App) {
+    if let Ok(hwnd) = window_handle(window) {
+        unsafe {
+            // SW_SHOW preserves a maximized window; only restore minimized ones.
+            let mode = if IsIconic(hwnd).as_bool() {
+                SW_RESTORE
+            } else {
+                SW_SHOW
+            };
+            let _ = ShowWindow(hwnd, mode);
+            let _ = SetForegroundWindow(hwnd);
+        }
+        if let Some(native) = &cx.global::<Tray>().native {
+            native.state.remove();
+        }
+        window.refresh();
+    }
 }
 
 fn window_handle(window: &Window) -> Result<HWND> {

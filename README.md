@@ -24,7 +24,7 @@ A native Windows app for managing local web projects, tools, and games. Browse c
 
 Starting a project refreshes its cached preview in the background and enables LAN preview. Copy its LAN link from the card or project details and open it on a device on the same network. Stopping the project closes the LAN preview too.
 
-Enable **Keep running in the system tray on close** in **Settings → General** to hide the window while projects keep running. Click the tray icon to restore the window, or right-click it and choose **Exit** to quit. This option is off by default.
+Enable **Keep running in the system tray on close** in **Settings → General** to hide the window while projects keep running. Click the tray icon to restore the window, or right-click it and choose **Exit** to quit. This option is off by default. Opening the app again brings the existing window to the front, including when it is hidden in the tray.
 
 Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Runtime**, started only for capture and closed afterward. An on-demand Node.js worker manages projects and development servers. Choose your data folder on first launch; it can be changed later in Settings. Project data and runtime preview caches stay local; only the selected documentation images are published.
 
