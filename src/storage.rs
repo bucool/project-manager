@@ -99,6 +99,19 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read only the saved language before creating UI inputs; no worker is needed.
+pub fn load_language() -> crate::i18n::Language {
+    let saved = (|| -> Result<crate::i18n::Language> {
+        let Some(directory) = load_location()? else {
+            return Ok(crate::i18n::Language::default());
+        };
+        let settings: Settings =
+            serde_json::from_slice(&fs::read(directory.join("settings.json"))?)?;
+        Ok(settings.language)
+    })();
+    saved.unwrap_or_default()
+}
+
 pub fn load_snapshot(directory: &Path) -> Result<Snapshot> {
     let settings_file = directory.join("settings.json");
     let settings: Settings = serde_json::from_slice(
@@ -184,7 +197,7 @@ pub fn configure(raw: &str, source: Option<&Path>, first_run: bool) -> Result<(P
             staging.path().join("settings.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "root": "", "roots": [], "favorites": [], "autoCapture": true,
-                "gameEnginesOnly": false, "closeToTray": false, "theme": "default"
+                "gameEnginesOnly": false, "closeToTray": false, "language": "system", "theme": "default"
             }))?,
         )?;
     }

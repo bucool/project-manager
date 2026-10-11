@@ -30,6 +30,8 @@ pub struct Settings {
     pub game_engines_only: bool,
     #[serde(default)]
     pub close_to_tray: bool,
+    #[serde(default)]
+    pub language: crate::i18n::Language,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
@@ -631,6 +633,10 @@ impl Backend {
         if let Some(close_to_tray) = value["closeToTray"].as_bool() {
             snapshot.settings.close_to_tray = close_to_tray;
             settings["closeToTray"] = Value::Bool(close_to_tray);
+        }
+        if let Some(language) = value.get("language") {
+            snapshot.settings.language = serde_json::from_value(language.clone())?;
+            settings["language"] = serde_json::to_value(snapshot.settings.language)?;
         }
         if let Some(theme) = value["theme"].as_str() {
             let theme = crate::theme::find(theme).id;

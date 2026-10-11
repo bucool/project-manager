@@ -1,7 +1,7 @@
 use crate::assets::ActionIcon;
 use crate::backend::{self, Backend, Event, Project, Request, Snapshot, SortOrder};
 use crate::dev_servers::{self, DevServer, Discovery, Monitor};
-use crate::i18n::{self, tr};
+use crate::i18n::{self, Language, tr};
 use crate::preview_cache::{self, PreviewCache, PreviewSource};
 use crate::smooth_scroll::SmoothScroll;
 use crate::theme::{self, Colors};
@@ -168,6 +168,8 @@ pub struct Workbench {
     auto_capture: bool,
     game_engines_only: bool,
     close_to_tray: bool,
+    draft_language: Language,
+    localized_english: bool,
     draft_theme: String,
     busy: bool,
     connected: bool,
@@ -326,8 +328,28 @@ impl Workbench {
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         if self.settings_open {
             self.settings_open = false;
+            self.apply_language(self.snapshot.settings.language, cx);
             theme::apply(&self.snapshot.settings.theme, cx);
         }
+    }
+
+    fn apply_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        if i18n::language() == language {
+            return;
+        }
+        let all_engines = self.engine == tr("全部引擎");
+        let was_english = i18n::english();
+        i18n::set_language(language);
+        gpui_component::set_locale(if i18n::english() { "en" } else { "zh-CN" });
+        if all_engines {
+            self.engine = tr("全部引擎").into();
+        }
+        if was_english != i18n::english() {
+            self.smooth_scroll.cancel();
+            // Re-measure rows with the new labels/font while preserving the scroll position.
+            self.list_key.2 = 0;
+        }
+        cx.notify();
     }
 
     fn search_field(&self, width: f32) -> Input {
@@ -535,11 +557,13 @@ impl Workbench {
             list: false,
             selected: None,
             settings_open: false,
-            settings_section: SettingsSection::Appearance,
+            settings_section: SettingsSection::General,
             settings_scroll: ScrollHandle::new(),
             auto_capture: true,
             game_engines_only: false,
             close_to_tray: false,
+            draft_language: i18n::language(),
+            localized_english: i18n::english(),
             draft_theme: "default".into(),
             busy: false,
             connected: false,
@@ -618,6 +642,9 @@ impl Workbench {
         cx.notify();
     }
     fn apply(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            self.apply_language(snapshot.settings.language, cx);
+        }
         if self.sort_order != snapshot.settings.sort_order {
             self.sort_order = snapshot.settings.sort_order;
             self.smooth_scroll.cancel();
@@ -851,6 +878,7 @@ impl Workbench {
         self.auto_capture = self.snapshot.settings.auto_capture;
         self.game_engines_only = self.snapshot.settings.game_engines_only;
         self.close_to_tray = self.snapshot.settings.close_to_tray;
+        self.draft_language = self.snapshot.settings.language;
         self.draft_theme = theme::find(&self.snapshot.settings.theme).id.into();
         self.selected = None;
         self.settings_open = true;
@@ -2739,14 +2767,100 @@ impl Workbench {
     }
 
     fn settings_general(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.settings_option(
-            "close-to-tray",
-            tr("关闭窗口后保留在托盘"),
-            tr("关闭窗口时隐藏到系统托盘，项目继续运行。点击托盘图标可恢复窗口。"),
-            self.close_to_tray,
-            |this, value| this.close_to_tray = value,
-            cx,
-        )
+        let colors = self.colors();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .p_5()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgb(colors.line))
+                    .bg(rgb(colors.surface))
+                    .child(text(tr("界面语言"), 14., colors.ink).font_weight(FontWeight::MEDIUM))
+                    .child(
+                        text(tr("默认使用系统语言，也可以手动选择。"), 12., colors.muted)
+                            .line_height(px(20.))
+                            .mt_2(),
+                    )
+                    .child(
+                        div().flex().gap_2().mt_4().children(
+                            [
+                                Language::System,
+                                Language::SimplifiedChinese,
+                                Language::English,
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, language)| {
+                                let active = self.draft_language == language;
+                                Button::new(("interface-language", index))
+                                    .ghost()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(42.))
+                                    .px_3()
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(rgb(if active {
+                                        colors.accent_border
+                                    } else {
+                                        colors.line
+                                    }))
+                                    .bg(rgb(if active {
+                                        colors.selected
+                                    } else {
+                                        colors.surface
+                                    }))
+                                    .disabled(self.busy)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_color(rgb(if active {
+                                                colors.selected_text
+                                            } else {
+                                                colors.ink
+                                            }))
+                                            .child(
+                                                text(
+                                                    language.label(),
+                                                    14.,
+                                                    if active {
+                                                        colors.selected_text
+                                                    } else {
+                                                        colors.ink
+                                                    },
+                                                )
+                                                .font_weight(if active {
+                                                    FontWeight::SEMIBOLD
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                }),
+                                            )
+                                            .when(active, |s| s.child(icon(IconName::Check, 16.))),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.draft_language = language;
+                                        this.apply_language(language, cx);
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                    ),
+            )
+            .child(self.settings_option(
+                "close-to-tray",
+                tr("关闭窗口后保留在托盘"),
+                tr("关闭窗口时隐藏到系统托盘，项目继续运行。点击托盘图标可恢复窗口。"),
+                self.close_to_tray,
+                |this, value| this.close_to_tray = value,
+                cx,
+            ))
     }
 
     fn settings_preview(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2971,6 +3085,7 @@ impl Workbench {
                 "autoCapture": self.auto_capture,
                 "gameEnginesOnly": self.game_engines_only,
                 "closeToTray": self.close_to_tray,
+                "language": self.draft_language,
                 "theme": self.draft_theme,
             }),
         ));
@@ -2988,7 +3103,7 @@ impl Workbench {
         let navigation_width = if i18n::english() { 204. } else { 184. };
         let content_width = width - navigation_width - 2. - 64.;
         let description = match self.settings_section {
-            SettingsSection::General => tr("设置窗口关闭行为。"),
+            SettingsSection::General => tr("设置界面语言和窗口关闭行为。"),
             SettingsSection::Appearance => tr("点击主题即时预览，保存后保留选择。"),
             SettingsSection::Directories => tr("管理项目来源文件夹。"),
             SettingsSection::Preview => tr("设置项目识别和画面获取方式。"),
@@ -3428,6 +3543,16 @@ impl Workbench {
 }
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let english = i18n::english();
+        if self.localized_english != english {
+            self.search.update(cx, |input, cx| {
+                input.set_placeholder(tr("搜索项目、类型或端口…"), window, cx);
+            });
+            self.storage_input.update(cx, |input, cx| {
+                input.set_placeholder(tr("例如 D:\\ProjectManagerData"), window, cx);
+            });
+            self.localized_english = english;
+        }
         let colors = self.colors();
         let selected = self
             .selected

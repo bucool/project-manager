@@ -1,6 +1,57 @@
-use std::{collections::HashMap, sync::OnceLock};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU8, Ordering},
+    },
+};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Language {
+    #[serde(rename = "zh-CN")]
+    SimplifiedChinese = 1,
+    #[serde(rename = "en")]
+    English = 2,
+    #[default]
+    #[serde(rename = "system", other)]
+    System = 0,
+}
+
+impl Language {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => tr("跟随系统"),
+            Self::SimplifiedChinese => "简体中文",
+            Self::English => "English",
+        }
+    }
+}
+
+static LANGUAGE: AtomicU8 = AtomicU8::new(Language::System as u8);
+
+pub fn language() -> Language {
+    match LANGUAGE.load(Ordering::Relaxed) {
+        1 => Language::SimplifiedChinese,
+        2 => Language::English,
+        _ => Language::System,
+    }
+}
+
+pub fn set_language(language: Language) {
+    LANGUAGE.store(language as u8, Ordering::Relaxed);
+}
 
 pub fn english() -> bool {
+    match language() {
+        Language::SimplifiedChinese => false,
+        Language::English => true,
+        Language::System => system_english(),
+    }
+}
+
+fn system_english() -> bool {
     static ENGLISH: OnceLock<bool> = OnceLock::new();
     *ENGLISH.get_or_init(|| {
         #[cfg(windows)]

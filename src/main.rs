@@ -24,6 +24,7 @@ fn main() {
         }
         return;
     }
+    i18n::set_language(storage::load_language());
     let (backend, events) = backend::Backend::start();
     Application::new()
         .with_assets(assets::Assets)

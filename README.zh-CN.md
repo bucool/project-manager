@@ -30,7 +30,7 @@ Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、
 
 ## 下载
 
-从 [Releases](https://github.com/bucool/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面自动跟随 Windows 显示语言：中文系统使用中文，其他语言使用英文。
+从 [Releases](https://github.com/bucool/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面默认跟随 Windows 显示语言：中文系统使用简体中文，其他语言使用 English。可在**设置 → 常规 → 界面语言**中选择**跟随系统、简体中文、English**，点击即时预览，保存后记住选择。
 
 ## 构建
 

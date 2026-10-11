@@ -30,7 +30,7 @@ Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Ru
 
 ## Download
 
-Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface follows your Windows display language: Chinese for Chinese systems, English otherwise.
+Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface defaults to your Windows display language: Simplified Chinese for Chinese systems, English otherwise. Choose **Follow system**, **简体中文**, or **English** in **Settings → General → Interface language**. Changes preview immediately; save to keep your choice.
 
 ## Build
 
