@@ -4,11 +4,29 @@
 
 A native Windows app for managing local web projects, tools, and games. Browse cached previews, organize multiple project folders, install dependencies, start or stop development servers, and inspect errors from one workspace.
 
+<p align="center">
+  <a href="docs/images/project-library.webp"><img src="docs/images/project-library.webp" width="100%" alt="Project Manager library with project folders and a cached preview"></a>
+  <br><sub>Project library · Cached previews · Multiple folders</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/appearance-themes.webp"><img src="docs/images/appearance-themes.webp" width="100%" alt="Appearance settings with eight color themes"></a>
+      <br><strong>Appearance themes</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/system-tray.webp"><img src="docs/images/system-tray.webp" width="100%" alt="General settings with the keep-running-in-system-tray option"></a>
+      <br><strong>System tray settings</strong>
+    </td>
+  </tr>
+</table>
+
 Starting a project refreshes its cached preview in the background and enables LAN preview. Copy its LAN link from the card or project details and open it on a device on the same network. Stopping the project closes the LAN preview too.
 
 Enable **Keep running in the system tray on close** in **Settings → General** to hide the window while projects keep running. Click the tray icon to restore the window, or right-click it and choose **Exit** to quit. This option is off by default.
 
-Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Runtime**, started only for capture and closed afterward. An on-demand Node.js worker manages projects and development servers. Choose your data folder on first launch; it can be changed later in Settings. No user project screenshots or caches are included in this repository.
+Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Runtime**, started only for capture and closed afterward. An on-demand Node.js worker manages projects and development servers. Choose your data folder on first launch; it can be changed later in Settings. Project data and runtime preview caches stay local; only the selected documentation images are published.
 
 ## Download
 

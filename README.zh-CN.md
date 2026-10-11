@@ -4,11 +4,29 @@
 
 Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、工具和游戏，管理多个项目文件夹，安装依赖、运行或停止开发服务、查看报错。
 
+<p align="center">
+  <a href="docs/images/project-library.webp"><img src="docs/images/project-library.webp" width="100%" alt="Project Manager 项目库、多目录管理与缓存预览"></a>
+  <br><sub>项目库 · 缓存预览 · 多目录管理</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/appearance-themes.webp"><img src="docs/images/appearance-themes.webp" width="100%" alt="外观设置中的八种配色主题"></a>
+      <br><strong>外观主题</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/system-tray.webp"><img src="docs/images/system-tray.webp" width="100%" alt="常规设置中的关闭窗口后保留在托盘选项"></a>
+      <br><strong>托盘设置</strong>
+    </td>
+  </tr>
+</table>
+
 手动启动项目后，自动在后台更新预览图并开启局域网预览。在卡片或项目详情中复制局域网链接，用同一网络下的设备打开即可；停止项目时一并关闭局域网预览。
 
 在**设置 → 常规**中开启**关闭窗口后保留在托盘**，关闭窗口时项目会继续运行。点击托盘图标恢复窗口，或右键选择**退出**以彻底退出。此选项默认关闭。
 
-界面使用 **Rust + GPUI**。预览截图调用系统 **Microsoft Edge WebView2 Runtime**，仅在获取画面时启动，完成后关闭。项目和开发服务由按需启动的 Node.js 后台管理。首次打开必须选择数据目录，之后可在设置中更换。仓库不包含任何用户项目截图或缓存。
+界面使用 **Rust + GPUI**。预览截图调用系统 **Microsoft Edge WebView2 Runtime**，仅在获取画面时启动，完成后关闭。项目和开发服务由按需启动的 Node.js 后台管理。首次打开必须选择数据目录，之后可在设置中更换。项目数据和运行时预览缓存保留在本机；仓库仅收录选定的文档展示图。
 
 ## 下载
 

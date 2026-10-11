@@ -20,6 +20,10 @@ screenshots/
 *.webp
 *.png
 !assets/app-icon.png
+# Selected, compressed README showcase images only.
+!docs/images/project-library.webp
+!docs/images/appearance-themes.webp
+!docs/images/system-tray.webp
 *.zip
 *.exe
 /dist/

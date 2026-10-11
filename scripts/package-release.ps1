@@ -36,9 +36,14 @@ foreach ($name in @('node.exe','LICENSE','npm','npm.cmd','npm.ps1','npx','npx.cm
 }
 Copy-Item -LiteralPath (Join-Path $nodeSource 'node_modules\npm') -Destination (Join-Path $nodeTarget 'node_modules') -Recurse
 
-# Documentation's only image is our original app icon.
+# Include only the app icon and selected public documentation images.
 New-Item -ItemType Directory -Path (Join-Path $package 'assets') | Out-Null
 Copy-Item -LiteralPath (Join-Path $workspace 'assets\app-icon.png') -Destination (Join-Path $package 'assets')
+$documentationImages = Join-Path $package 'docs\images'
+New-Item -ItemType Directory -Path $documentationImages -Force | Out-Null
+foreach ($name in @('project-library.webp', 'appearance-themes.webp', 'system-tray.webp')) {
+    Copy-Item -LiteralPath (Join-Path $workspace "docs\images\$name") -Destination $documentationImages
+}
 # Carry the Rust dependencies' original license/notice texts with the portable binary.
 $cargoDirectory = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
 $registry = Join-Path $cargoDirectory 'registry\src'
