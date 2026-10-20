@@ -553,19 +553,7 @@ impl Notes {
         self.body
             .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
         self.editing = Some(range);
-        let line = value.lines().count().saturating_sub(1) as u32;
-        let column = value
-            .lines()
-            .last()
-            .map(|line| line.chars().count())
-            .unwrap_or(0) as u32;
-        self.body.update(cx, |input, cx| {
-            input.set_cursor_position(
-                gpui_component::input::Position::new(line, column),
-                window,
-                cx,
-            )
-        });
+        self.set_editor_cursor(value.len(), window, cx);
         cx.notify();
     }
     fn switch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1002,6 +990,135 @@ impl Notes {
             .unwrap_or(cursor..cursor);
         self.begin_edit(editing.clone(), window, cx);
         self.set_editor_cursor(cursor.saturating_sub(editing.start), window, cx);
+        true
+    }
+    fn delete_at_block_boundary(
+        &mut self,
+        backward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.document_has_focus(window, cx) {
+            return false;
+        }
+        let cursor = if self.body.read(cx).focus_handle(cx).is_focused(window) {
+            let Some(editing) = self.editing.clone() else {
+                return false;
+            };
+            let (offset, length, selected, composing) = self.body.update(cx, |input, cx| {
+                (
+                    input.cursor(),
+                    input.value().len(),
+                    input
+                        .selected_text_range(false, window, cx)
+                        .is_some_and(|selection| !selection.range.is_empty()),
+                    input.marked_text_range(window, cx).is_some(),
+                )
+            });
+            // Inside a paragraph, native input handles selections, graphemes and IME.
+            if selected || composing || (backward && offset != 0) || (!backward && offset != length)
+            {
+                return false;
+            }
+            editing.start + offset
+        } else {
+            let Some((anchor, end)) = self.text_selection else {
+                return false;
+            };
+            if anchor != end {
+                return false;
+            }
+            end
+        };
+        self.changed(cx);
+        let Some(note) = self.library.notes.get(self.library.active) else {
+            return false;
+        };
+        if !note.body.is_char_boundary(cursor) {
+            return false;
+        }
+        // An adjacent image is an object, not individual Markdown punctuation.
+        if let Some((range, name)) = local_images(&note.body).into_iter().find(|(range, _)| {
+            if backward {
+                range.end == cursor
+            } else {
+                range.start == cursor
+            }
+        }) {
+            self.select_image(name, range.end, window, cx);
+            return true;
+        }
+        let removal = if backward {
+            note.body[..cursor]
+                .char_indices()
+                .next_back()
+                .map(|(start, ch)| {
+                    let start = if ch == '\n' && note.body[..start].ends_with('\r') {
+                        start - 1
+                    } else {
+                        start
+                    };
+                    (start..cursor, ch)
+                })
+        } else {
+            note.body[cursor..].chars().next().map(|ch| {
+                let length = if note.body[cursor..].starts_with("\r\n") {
+                    2
+                } else {
+                    ch.len_utf8()
+                };
+                (cursor..cursor + length, ch)
+            })
+        };
+        let Some((removal, ch)) = removal else {
+            return false;
+        };
+        if !ch.is_whitespace() {
+            let block = markdown_blocks(&note.body).into_iter().find(|range| {
+                if backward {
+                    range.start < cursor && cursor <= range.end
+                } else {
+                    range.start <= cursor && cursor < range.end
+                }
+            });
+            if let Some(block) = block {
+                self.begin_edit(block.clone(), window, cx);
+                self.set_editor_cursor(cursor - block.start, window, cx);
+                let action: Box<dyn Action> = if backward {
+                    Box::new(gpui_component::input::Backspace)
+                } else {
+                    Box::new(gpui_component::input::Delete)
+                };
+                window.dispatch_action(action, cx);
+                return true;
+            }
+            return false;
+        }
+        let cursor = removal.start;
+        self.library.notes[self.library.active]
+            .body
+            .replace_range(removal, "");
+        self.editing = None;
+        self.selected_image = None;
+        self.text_selection = Some((cursor, cursor));
+        self.text_drag = None;
+        self.persist(Vec::new(), cx);
+        let note = &self.library.notes[self.library.active];
+        let line_start = note.body[..cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let line_end = note.body[cursor..]
+            .find('\n')
+            .map(|index| cursor + index)
+            .unwrap_or(note.body.len());
+        if note.body[line_start..line_end].trim().is_empty() {
+            self.begin_edit(cursor..cursor, window, cx);
+        } else {
+            // Once the real blank line is gone, do not leave an empty input row behind.
+            self.document_focus.focus(window);
+        }
+        cx.notify();
         true
     }
     fn render_text(&self, source: &str, base: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1844,6 +1961,16 @@ impl Render for Notes {
                 if this.document_focus.is_focused(window)
                     && (event.keystroke.key == "backspace" || event.keystroke.key == "delete")
                     && this.delete_selected_image(window, cx)
+                {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    return;
+                }
+                if !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.alt
+                    && (event.keystroke.key == "backspace" || event.keystroke.key == "delete")
+                    && this.delete_at_block_boundary(event.keystroke.key == "backspace", window, cx)
                 {
                     cx.stop_propagation();
                     window.prevent_default();
