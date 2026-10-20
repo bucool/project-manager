@@ -4311,6 +4311,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "image",
+ "markdown",
  "raw-window-handle",
  "serde",
  "serde_json",

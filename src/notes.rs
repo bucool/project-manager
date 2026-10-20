@@ -10,86 +10,60 @@ use gpui_component::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock, mpsc},
+    sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-// Resolve relative Markdown image URLs locally, without a server or network request.
-#[derive(Default)]
-struct NoteImages {
-    root: PathBuf,
-    pending: HashMap<String, Arc<Vec<u8>>>,
-}
-struct NoteImageClient {
-    fallback: Arc<dyn gpui::http_client::HttpClient>,
-    images: Arc<RwLock<NoteImages>>,
-    executor: BackgroundExecutor,
-}
-impl gpui::http_client::HttpClient for NoteImageClient {
-    fn send(
-        &self,
-        request: gpui::http_client::Request<gpui::http_client::AsyncBody>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<
-                        gpui::http_client::Response<gpui::http_client::AsyncBody>,
-                    >,
-                > + Send,
-        >,
-    > {
-        let uri = request.uri();
-        if uri.scheme().is_none() {
-            if let Some(name) = uri
-                .path()
-                .trim_start_matches('/')
-                .strip_prefix("notes-images/")
-            {
-                if image_name(name) {
-                    let name = name.to_owned();
-                    let images = self.images.clone();
-                    return Box::pin(self.executor.spawn(async move {
-                        let (path, pending) = {
-                            let images = images
-                                .read()
-                                .map_err(|_| anyhow::anyhow!("Image storage unavailable"))?;
-                            (
-                                images.root.join("notes-images").join(&name),
-                                images.pending.get(&name).cloned(),
-                            )
-                        };
-                        let bytes = if let Some(bytes) = pending {
-                            bytes.as_ref().clone()
-                        } else {
-                            fs::read(path)?
-                        };
-                        Ok(gpui::http_client::Response::builder()
-                            .status(200)
-                            .body(bytes.into())?)
-                    }));
+// Keep source ranges so editing a rendered block only changes that block.
+fn markdown_blocks(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut blocks = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
+        if let Some(children) = root.children() {
+            for node in children {
+                if let Some(position) = node.position() {
+                    let range = position.start.offset..position.end.offset;
+                    if range.end <= source.len()
+                        && source.is_char_boundary(range.start)
+                        && source.is_char_boundary(range.end)
+                    {
+                        blocks.push(range);
+                    } else {
+                        return vec![0..source.len()];
+                    }
                 }
             }
         }
-        self.fallback.send(request)
     }
-    fn user_agent(&self) -> Option<&gpui::http_client::http::HeaderValue> {
-        self.fallback.user_agent()
+    if blocks.is_empty() && !source.is_empty() {
+        blocks.push(0..source.len());
     }
-    fn proxy(&self) -> Option<&url::Url> {
-        self.fallback.proxy()
-    }
-    fn type_name(&self) -> &'static str {
-        "ProjectManagerNoteImages"
-    }
+    blocks
 }
-#[derive(Clone, Copy, PartialEq)]
-enum MarkdownMode {
-    Edit,
-    Preview,
+fn local_images(source: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    fn visit(node: &markdown::mdast::Node, out: &mut Vec<(std::ops::Range<usize>, String)>) {
+        if let markdown::mdast::Node::Image(image) = node {
+            if let (Some(name), Some(position)) =
+                (image.url.strip_prefix("notes-images/"), node.position())
+            {
+                if image_name(name) {
+                    out.push((position.start.offset..position.end.offset, name.to_owned()));
+                }
+            }
+        }
+        if let Some(children) = node.children() {
+            for child in children {
+                visit(child, out);
+            }
+        }
+    }
+    let mut images = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
+        visit(&root, &mut images);
+    }
+    images
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -268,8 +242,9 @@ pub struct Notes {
     title_edit: Option<Option<String>>,
     dialog_focus: FocusHandle,
     font_settings_open: bool,
-    markdown_mode: MarkdownMode,
-    image_store: Arc<RwLock<NoteImages>>,
+    editing: Option<std::ops::Range<usize>>,
+    document_scroll: ScrollHandle,
+    document_focus: FocusHandle,
     delete_note: Option<String>,
     title: Entity<InputState>,
     body: Entity<InputState>,
@@ -291,19 +266,47 @@ impl Notes {
     }
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx));
-        let body = cx.new(|cx| InputState::new(window, cx).multi_line(true));
-        let subscriptions = vec![cx.subscribe(&body, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.changed(cx);
-            }
-        })];
+        let body = cx.new(|cx| InputState::new(window, cx).auto_grow(1, 3000));
+        let subscriptions =
+            vec![
+                cx.subscribe_in(
+                    &body,
+                    window,
+                    |this, _, event: &InputEvent, window, cx| match event {
+                        InputEvent::Change => this.changed(cx),
+                        InputEvent::Blur
+                            if !this.body.read(cx).focus_handle(cx).is_focused(window) =>
+                        {
+                            this.changed(cx);
+                            this.editing = None;
+                            cx.notify();
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            this.changed(cx);
+                            let value = this.body.read(cx).value();
+                            let heading = value.starts_with('#') && value.ends_with('\n');
+                            if (value.ends_with("\n\n") || heading)
+                                && !value.contains("```")
+                                && !value.contains("~~~")
+                            {
+                                if let Some(range) = &this.editing {
+                                    let end = range.end;
+                                    this.begin_edit(end..end, window, cx);
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                ),
+            ];
         Self {
             library: Library::default(),
             title_edit: None,
             dialog_focus: cx.focus_handle(),
             font_settings_open: false,
-            markdown_mode: MarkdownMode::Edit,
-            image_store: Arc::new(RwLock::new(NoteImages::default())),
+            editing: None,
+            document_scroll: ScrollHandle::new(),
+            document_focus: cx.focus_handle(),
             delete_note: None,
             title,
             body,
@@ -359,15 +362,6 @@ impl Notes {
                     }
                     library.inline_images = true;
                 }
-                if let Ok(mut images) = self.image_store.write() {
-                    images.root = root.clone();
-                }
-                let image_client = Arc::new(NoteImageClient {
-                    fallback: cx.http_client(),
-                    images: self.image_store.clone(),
-                    executor: cx.background_executor().clone(),
-                });
-                cx.set_http_client(image_client);
                 library.font_size = library.font_size.clamp(10, 36);
                 self.library = library;
                 self.root = Some(root.clone());
@@ -403,17 +397,11 @@ impl Notes {
                     while let Ok((revision, root, result)) = receiver.recv().await {
                         if this
                             .update(cx, |this, cx| {
-                                if let Ok(mut images) = this.image_store.write() {
-                                    images.root = root.clone();
-                                }
                                 this.root = Some(root);
                                 match result {
                                     Ok(()) => {
                                         if revision == this.revision {
                                             this.pending_images.clear();
-                                            if let Ok(mut images) = this.image_store.write() {
-                                                images.pending.clear();
-                                            }
                                             this.failed = false;
                                             this.status = tr("已保存").into();
                                         }
@@ -473,20 +461,264 @@ impl Notes {
         self.persist(Vec::new(), cx);
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
+        let Some(range) = self.editing.clone() else {
+            return;
+        };
+        let value = self.body.read(cx).value().to_string();
         if let Some(note) = self.library.notes.get_mut(self.library.active) {
-            note.body = self.body.read(cx).value().to_string();
-            self.persist(Vec::new(), cx);
+            if range.end <= note.body.len()
+                && note.body.is_char_boundary(range.start)
+                && note.body.is_char_boundary(range.end)
+            {
+                if note.body[range.clone()] == value {
+                    return;
+                }
+                note.body.replace_range(range.clone(), &value);
+                self.editing = Some(range.start..range.start + value.len());
+                self.persist(Vec::new(), cx);
+            }
         }
     }
+    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.is_some() {
+            self.body.read(cx).focus_handle(cx).focus(window);
+        } else {
+            self.document_focus.focus(window);
+        }
+    }
+    fn begin_edit(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(note) = self.library.notes.get(self.library.active) else {
+            return;
+        };
+        let Some(value) = note.body.get(range.clone()).map(str::to_owned) else {
+            return;
+        };
+        self.editing = None;
+        self.body
+            .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+        self.editing = Some(range);
+        let line = value.lines().count().saturating_sub(1) as u32;
+        let column = value
+            .lines()
+            .last()
+            .map(|line| line.chars().count())
+            .unwrap_or(0) as u32;
+        self.body.update(cx, |input, cx| {
+            input.set_cursor_position(
+                gpui_component::input::Position::new(line, column),
+                window,
+                cx,
+            )
+        });
+        cx.notify();
+    }
     fn switch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.document_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(note) = self.library.notes.get(index).cloned() {
             self.library.active = index;
             self.title
                 .update(cx, |input, cx| input.set_value(note.title, window, cx));
             self.body
-                .update(cx, |input, cx| input.set_value(note.body, window, cx));
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            if note.body.is_empty() {
+                self.editing = Some(0..0);
+            }
         }
         cx.notify();
+    }
+    fn rendered_block(
+        &self,
+        source: &str,
+        start: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(self.library.font_size as f32));
+        let mut offset = 0;
+        for (range, name) in local_images(source) {
+            if range.start < offset
+                || range.end > source.len()
+                || !source.is_char_boundary(range.start)
+                || !source.is_char_boundary(range.end)
+            {
+                continue;
+            }
+            if range.start > offset {
+                block = block.child(
+                    TextView::markdown(
+                        SharedString::from(format!("note-text-{start}-{offset}")),
+                        source[offset..range.start].to_owned(),
+                        window,
+                        cx,
+                    )
+                    .style(TextViewStyle {
+                        heading_base_font_size: px(self.library.font_size as f32),
+                        ..Default::default()
+                    }),
+                );
+            }
+            let image: AnyElement = if let Some((_, bytes)) =
+                self.pending_images.iter().find(|(file, _)| file == &name)
+            {
+                let format = match name.rsplit('.').next().unwrap_or("") {
+                    "jpg" | "jpeg" => ImageFormat::Jpeg,
+                    "webp" => ImageFormat::Webp,
+                    "gif" => ImageFormat::Gif,
+                    "bmp" => ImageFormat::Bmp,
+                    "tiff" => ImageFormat::Tiff,
+                    "svg" => ImageFormat::Svg,
+                    _ => ImageFormat::Png,
+                };
+                img(Arc::new(Image::from_bytes(format, bytes.clone())))
+                    .max_w_full()
+                    .max_h(px(720.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            } else if let Some(path) = self
+                .root
+                .as_ref()
+                .map(|root| root.join("notes-images").join(&name))
+                .filter(|path| path.is_file())
+            {
+                img(path)
+                    .max_w_full()
+                    .max_h(px(720.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            } else {
+                div()
+                    .text_color(rgb(0xc44b4b))
+                    .child(tr("图片文件不存在"))
+                    .into_any_element()
+            };
+            let image_end = start + range.end;
+            let insertion = start + source.len();
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("note-picture-{image_end}")))
+                    .child(image)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.begin_edit(insertion..insertion, window, cx);
+                    })),
+            );
+            offset = range.end;
+        }
+        if offset < source.len() {
+            block = block.child(
+                TextView::markdown(
+                    SharedString::from(format!("note-text-{start}-{offset}")),
+                    source[offset..].to_owned(),
+                    window,
+                    cx,
+                )
+                .style(TextViewStyle {
+                    heading_base_font_size: px(self.library.font_size as f32),
+                    ..Default::default()
+                }),
+            );
+        }
+        block.into_any_element()
+    }
+    fn document(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let source = self
+            .library
+            .notes
+            .get(self.library.active)
+            .map(|note| note.body.as_str())
+            .unwrap_or("");
+        let mut ranges = Vec::new();
+        let mut inserted = false;
+        for range in markdown_blocks(source) {
+            if let Some(editing) = &self.editing {
+                if !inserted && range.start >= editing.start {
+                    ranges.push((editing.clone(), true));
+                    inserted = true;
+                }
+                if range.start < editing.end && range.end > editing.start {
+                    continue;
+                }
+            }
+            ranges.push((range, false));
+        }
+        if let Some(editing) = &self.editing {
+            if !inserted {
+                ranges.push((editing.clone(), true));
+            }
+        }
+        let mut document = div()
+            .id("note-document-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.document_scroll)
+            .track_focus(&self.document_focus)
+            .flex()
+            .flex_col()
+            .gap_3();
+        for (range, active) in ranges {
+            if active {
+                document = document.child(
+                    Input::new(&self.body)
+                        .flex_shrink_0()
+                        .appearance(false)
+                        .bordered(false)
+                        .focus_bordered(false)
+                        .text_size(px(self.library.font_size as f32))
+                        .p_0(),
+                );
+            } else if let Some(value) = source.get(range.clone()) {
+                let content = self.rendered_block(value, range.start, window, cx);
+                document = document.child(
+                    div()
+                        .id(SharedString::from(format!("note-block-{}", range.start)))
+                        .flex_shrink_0()
+                        .min_h(px(self.library.font_size as f32 * 1.5))
+                        .cursor_text()
+                        .child(content)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.begin_edit(range.clone(), window, cx)
+                        })),
+                );
+            }
+        }
+        let end = source.len();
+        document = document.child(
+            div()
+                .id("note-document-end")
+                .min_h(px(1.))
+                .flex_1()
+                .cursor_text()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let mut end = end;
+                    if let Some(note) = this.library.notes.get_mut(this.library.active) {
+                        if !note.body.is_empty() && !note.body.ends_with("\n\n") {
+                            note.body.push_str("\n\n");
+                            end = note.body.len();
+                            this.persist(Vec::new(), cx);
+                        }
+                    }
+                    this.begin_edit(end..end, window, cx);
+                })),
+        );
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(document)
+            .child(gpui_component::scroll::Scrollbar::vertical(
+                &self.document_scroll,
+            ))
+            .into_any_element()
     }
     fn edit_title(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (id, title) = if create {
@@ -523,7 +755,7 @@ impl Notes {
             self.switch(self.library.notes.len() - 1, window, cx);
         }
         self.persist(Vec::new(), cx);
-        self.body.read(cx).focus_handle(cx).focus(window);
+        self.focus_editor(window, cx);
     }
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.delete_note.take() else {
@@ -605,7 +837,7 @@ impl Notes {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.title_edit = None;
                                         this.delete_note = None;
-                                        this.body.read(cx).focus_handle(cx).focus(window);
+                                        this.focus_editor(window, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -627,7 +859,7 @@ impl Notes {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.title_edit = None;
                                         this.delete_note = None;
-                                        this.body.read(cx).focus_handle(cx).focus(window);
+                                        this.focus_editor(window, cx);
                                         cx.notify();
                                     })),
                             )
@@ -692,10 +924,9 @@ impl Notes {
         if images.is_empty() {
             return false;
         }
-        if let Ok(mut store) = self.image_store.write() {
-            for (name, bytes) in &images {
-                store.pending.insert(name.clone(), Arc::new(bytes.clone()));
-            }
+        if self.editing.is_none() {
+            let end = self.library.notes[self.library.active].body.len();
+            self.begin_edit(end..end, window, cx);
         }
         let markdown = images
             .iter()
@@ -706,7 +937,9 @@ impl Notes {
             input.replace(format!("\n\n{markdown}\n\n"), window, cx);
             cx.notify();
         });
-        self.library.notes[self.library.active].body = self.body.read(cx).value().to_string();
+        self.changed(cx);
+        self.editing = None;
+        self.document_focus.focus(window);
         self.library.notes[self.library.active]
             .images
             .extend(images.iter().map(|(name, _)| name.clone()));
@@ -857,69 +1090,6 @@ impl Render for Notes {
                     cx.notify();
                 })),
         );
-        for (index, (mode, glyph, label)) in [
-            (
-                MarkdownMode::Edit,
-                IconName::SquareTerminal,
-                tr("Markdown 编辑"),
-            ),
-            (MarkdownMode::Preview, IconName::Eye, tr("Markdown 预览")),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            tabs = tabs.child(
-                Button::new(("note-markdown-mode", index))
-                    .ghost()
-                    .icon(glyph)
-                    .tooltip(label)
-                    .w(px(40.))
-                    .h(px(40.))
-                    .when(self.markdown_mode == mode, |s| s.bg(rgb(colors.selected)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.markdown_mode = mode;
-                        if mode == MarkdownMode::Preview {
-                            this.dialog_focus.focus(window);
-                        } else {
-                            this.body.read(cx).focus_handle(cx).focus(window);
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        let markdown = self
-            .library
-            .notes
-            .get(self.library.active)
-            .map(|note| note.body.clone())
-            .unwrap_or_default();
-        let preview = div()
-            .id("notes-markdown-preview")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .text_size(px(self.library.font_size as f32))
-            .child(
-                TextView::markdown(
-                    SharedString::from(format!(
-                        "notes-markdown-{}",
-                        self.library
-                            .notes
-                            .get(self.library.active)
-                            .map(|note| note.id.as_str())
-                            .unwrap_or("empty")
-                    )),
-                    markdown,
-                    window,
-                    cx,
-                )
-                .style(TextViewStyle {
-                    heading_base_font_size: px(self.library.font_size as f32),
-                    ..Default::default()
-                })
-                .selectable(true)
-                .scrollable(true),
-            );
         div()
             .relative()
             .size_full()
@@ -935,7 +1105,7 @@ impl Render for Notes {
                     if this.title_edit.is_some() || this.delete_note.is_some() {
                         this.title_edit = None;
                         this.delete_note = None;
-                        this.body.read(cx).focus_handle(cx).focus(window);
+                        this.focus_editor(window, cx);
                         cx.stop_propagation();
                         cx.notify();
                     }
@@ -945,7 +1115,6 @@ impl Render for Notes {
                 cx.listener(|this, _: &gpui_component::input::Paste, window, cx| {
                     if this.title_edit.is_none()
                         && this.delete_note.is_none()
-                        && this.markdown_mode != MarkdownMode::Preview
                         && this.paste_image(window, cx)
                     {
                         cx.stop_propagation();
@@ -1012,30 +1181,7 @@ impl Render for Notes {
                 )
             })
             .when(!self.library.notes.is_empty(), |s| {
-                s.child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .flex()
-                        .gap_5()
-                        .when(self.markdown_mode != MarkdownMode::Preview, |s| {
-                            s.child(
-                                div().flex_1().min_w_0().h_full().child(
-                                    Input::new(&self.body)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .focus_bordered(false)
-                                        .text_size(px(self.library.font_size as f32))
-                                        .pb_0()
-                                        .h_full(),
-                                ),
-                            )
-                        })
-                        .when(self.markdown_mode != MarkdownMode::Edit, |s| {
-                            s.child(preview)
-                        }),
-                )
+                s.child(self.document(window, cx))
             })
             .when(self.library.notes.is_empty(), |s| {
                 s.child(
