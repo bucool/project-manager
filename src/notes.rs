@@ -9,6 +9,8 @@ use gpui_component::{
 };
 #[path = "notes_editor.rs"]
 mod editor;
+#[path = "notes_image.rs"]
+mod picture;
 #[path = "notes_text.rs"]
 mod text;
 use serde::{Deserialize, Serialize};
@@ -864,19 +866,8 @@ impl Notes {
             let text_selected = self.selection_range().is_some_and(|selection| {
                 selection.start < start + range.end && selection.end > start + range.start
             });
-            // GPUI gives Img its intrinsic aspect ratio. Percentage dimensions can
-            // retain that intrinsic minimum when only the frame height shrinks.
-            // Constrain the image itself to the user's independent dimensions.
             let render_image = |image: Img| {
-                image
-                    .w(px(size.width))
-                    .min_w(px(size.width))
-                    .max_w(px(size.width))
-                    .h(px(size.height))
-                    .min_h(px(size.height))
-                    .max_h(px(size.height))
-                    .flex_shrink_0()
-                    .object_fit(ObjectFit::Fill)
+                picture::ResizableImage::new(image, gpui::size(px(size.width), px(size.height)))
                     .into_any_element()
             };
             let image: AnyElement = if let Some((_, bytes)) =
