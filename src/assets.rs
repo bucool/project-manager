@@ -4,6 +4,9 @@ use std::borrow::Cow;
 
 const PLAY: &str = "project-manager/icons/play.svg";
 const REFRESH: &str = "project-manager/icons/refresh.svg";
+const EDIT: &str = "project-manager/icons/edit.svg";
+const TRASH: &str = "project-manager/icons/trash.svg";
+const CHECK: &str = "icons/check.svg";
 pub const APP_ICON: &str = "project-manager/app-icon.png";
 
 pub struct Assets;
@@ -20,6 +23,12 @@ impl AssetSource for Assets {
             REFRESH => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/refresh.svg"
             )))),
+            EDIT => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/edit.svg"
+            )))),
+            TRASH => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/trash.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -27,7 +36,7 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = gpui_component_assets::Assets.list(path)?;
         assets.extend(
-            [PLAY, REFRESH, APP_ICON]
+            [PLAY, REFRESH, EDIT, TRASH, APP_ICON]
                 .into_iter()
                 .filter(|asset| asset.starts_with(path))
                 .map(Into::into),
@@ -39,6 +48,9 @@ impl AssetSource for Assets {
 pub enum ActionIcon {
     Play,
     Refresh,
+    Edit,
+    Trash,
+    Check,
 }
 
 impl From<ActionIcon> for Icon {
@@ -46,6 +58,9 @@ impl From<ActionIcon> for Icon {
         Icon::default().path(match icon {
             ActionIcon::Play => PLAY,
             ActionIcon::Refresh => REFRESH,
+            ActionIcon::Edit => EDIT,
+            ActionIcon::Trash => TRASH,
+            ActionIcon::Check => CHECK,
         })
     }
 }

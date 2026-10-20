@@ -272,5 +272,10 @@
   "移除图片": "Remove image",
   "Ctrl+V 粘贴图片，文字修改自动保存": "Ctrl+V to paste images. Text changes save automatically.",
   "新建一条笔记，记录想法。": "Create a note to capture your ideas.",
-  "设置笔记和图片的保存位置，更换目录后立即生效。": "Choose where notes and images are stored. Folder changes take effect immediately."
+  "设置笔记和图片的保存位置，更换目录后立即生效。": "Choose where notes and images are stored. Folder changes take effect immediately.",
+  "删除笔记": "Delete note",
+  "修改笔记名称": "Rename note",
+  "确定删除这条笔记吗？此操作无法撤销。": "Delete this note? This action cannot be undone.",
+  "确认删除": "Confirm delete",
+  "保存": "Save"
 }

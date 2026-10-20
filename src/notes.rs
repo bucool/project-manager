@@ -3,7 +3,7 @@ use crate::i18n::tr;
 use anyhow::{Context as _, Result, bail};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Disableable,
+    Disableable, IconName,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
 };
@@ -172,6 +172,9 @@ fn unique() -> String {
 
 pub struct Notes {
     library: Library,
+    title_edit: Option<Option<String>>,
+    dialog_focus: FocusHandle,
+    delete_note: Option<String>,
     title: Entity<InputState>,
     body: Entity<InputState>,
     root: Option<PathBuf>,
@@ -193,18 +196,16 @@ impl Notes {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx));
         let body = cx.new(|cx| InputState::new(window, cx).multi_line(true));
-        let subscriptions = [&title, &body]
-            .into_iter()
-            .map(|input| {
-                cx.subscribe(input, |this, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.changed(cx);
-                    }
-                })
-            })
-            .collect();
+        let subscriptions = vec![cx.subscribe(&body, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.changed(cx);
+            }
+        })];
         Self {
             library: Library::default(),
+            title_edit: None,
+            dialog_focus: cx.focus_handle(),
+            delete_note: None,
             title,
             body,
             root: None,
@@ -339,7 +340,6 @@ impl Notes {
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         if let Some(note) = self.library.notes.get_mut(self.library.active) {
-            note.title = self.title.read(cx).value().to_string();
             note.body = self.body.read(cx).value().to_string();
             self.persist(Vec::new(), cx);
         }
@@ -354,15 +354,177 @@ impl Notes {
         }
         cx.notify();
     }
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.library.notes.push(Note {
-            id: unique(),
-            title: tr("新笔记").into(),
-            ..Default::default()
-        });
-        self.switch(self.library.notes.len() - 1, window, cx);
-        self.persist(Vec::new(), cx);
+    fn edit_title(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (id, title) = if create {
+            (None, tr("新笔记").to_owned())
+        } else if let Some(note) = self.library.notes.get(self.library.active) {
+            (Some(note.id.clone()), note.title.clone())
+        } else {
+            return;
+        };
+        self.title_edit = Some(id);
+        self.title
+            .update(cx, |input, cx| input.set_value(title, window, cx));
         self.title.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+    fn finish_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.title.read(cx).value().trim().to_owned();
+        if title.is_empty() {
+            return;
+        }
+        let Some(edit) = self.title_edit.take() else {
+            return;
+        };
+        if let Some(id) = edit {
+            if let Some(note) = self.library.notes.iter_mut().find(|n| n.id == id) {
+                note.title = title;
+            }
+        } else {
+            self.library.notes.push(Note {
+                id: unique(),
+                title,
+                ..Default::default()
+            });
+            self.switch(self.library.notes.len() - 1, window, cx);
+        }
+        self.persist(Vec::new(), cx);
+        self.body.read(cx).focus_handle(cx).focus(window);
+    }
+    fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.delete_note.take() else {
+            return;
+        };
+        if let Some(index) = self.library.notes.iter().position(|n| n.id == id) {
+            let removed = self.library.notes.remove(index);
+            self.pending_images
+                .retain(|(name, _)| !removed.images.contains(name));
+            let active = if index < self.library.active {
+                self.library.active - 1
+            } else {
+                self.library.active
+            };
+            self.library.active = active.min(self.library.notes.len().saturating_sub(1));
+            self.switch(self.library.active, window, cx);
+            self.persist(Vec::new(), cx);
+        }
+        cx.notify();
+    }
+    fn note_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.colors;
+        let deleting = self.delete_note.is_some();
+        let name = self
+            .delete_note
+            .as_ref()
+            .and_then(|id| self.library.notes.iter().find(|n| &n.id == id))
+            .map(|n| n.title.clone())
+            .unwrap_or_default();
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .bg(rgba(0x18251c66))
+            .track_focus(&self.dialog_focus)
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" && !deleting {
+                    this.finish_title(window, cx);
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            }))
+            .child(
+                div()
+                    .w(px(420.))
+                    .p_6()
+                    .rounded(px(14.))
+                    .bg(rgb(colors.bg))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(19.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(if deleting {
+                                        tr("删除笔记")
+                                    } else if self.title_edit == Some(None) {
+                                        tr("新建笔记")
+                                    } else {
+                                        tr("修改笔记名称")
+                                    }),
+                            )
+                            .child(
+                                Button::new("close-note-dialog")
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .tooltip(tr("取消"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.title_edit = None;
+                                        this.delete_note = None;
+                                        this.body.read(cx).focus_handle(cx).focus(window);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .when(deleting, |s| {
+                        s.child(name)
+                            .child(tr("确定删除这条笔记吗？此操作无法撤销。"))
+                    })
+                    .when(!deleting, |s| s.child(Input::new(&self.title).h(px(40.))))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-note-dialog")
+                                    .ghost()
+                                    .label(tr("取消"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.title_edit = None;
+                                        this.delete_note = None;
+                                        this.body.read(cx).focus_handle(cx).focus(window);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("confirm-note-dialog")
+                                    .icon(if deleting {
+                                        crate::assets::ActionIcon::Trash
+                                    } else {
+                                        crate::assets::ActionIcon::Check
+                                    })
+                                    .tooltip(if deleting {
+                                        tr("确认删除")
+                                    } else {
+                                        tr("保存")
+                                    })
+                                    .when(deleting, |s| {
+                                        s.label(tr("确认删除"))
+                                            .bg(rgb(0xc94b4b))
+                                            .text_color(rgb(0xffffff))
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if deleting {
+                                            this.confirm_delete(window, cx);
+                                        } else {
+                                            this.finish_title(window, cx);
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
     fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
         if self.library.notes.is_empty() || self.sender.is_none() {
@@ -493,10 +655,46 @@ impl Render for Notes {
         }
         tabs = tabs.child(
             Button::new("new-note")
-                .label(tr("新建笔记"))
+                .icon(IconName::Plus)
+                .tooltip(tr("新建笔记"))
+                .w(px(40.))
+                .h(px(40.))
                 .disabled(self.sender.is_none() || self.moving)
-                .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.edit_title(true, window, cx))),
         );
+        if !self.library.notes.is_empty() {
+            tabs = tabs
+                .child(
+                    Button::new("rename-note")
+                        .ghost()
+                        .icon(crate::assets::ActionIcon::Edit)
+                        .tooltip(tr("修改笔记名称"))
+                        .w(px(40.))
+                        .h(px(40.))
+                        .disabled(self.moving)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.edit_title(false, window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("delete-note")
+                        .ghost()
+                        .icon(crate::assets::ActionIcon::Trash)
+                        .tooltip(tr("删除笔记"))
+                        .w(px(40.))
+                        .h(px(40.))
+                        .disabled(self.moving)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.dialog_focus.focus(window);
+                            this.delete_note = this
+                                .library
+                                .notes
+                                .get(this.library.active)
+                                .map(|n| n.id.clone());
+                            cx.notify();
+                        })),
+                );
+        }
         let mut images = div()
             .id("note-images")
             .flex()
@@ -525,7 +723,8 @@ impl Render for Notes {
                         .child(
                             Button::new(("remove-note-image", index))
                                 .ghost()
-                                .label(tr("移除图片"))
+                                .icon(crate::assets::ActionIcon::Trash)
+                                .tooltip(tr("移除图片"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.library.notes[this.library.active].images.remove(index);
                                     this.persist(Vec::new(), cx);
@@ -535,6 +734,7 @@ impl Render for Notes {
             }
         }
         div()
+            .relative()
             .size_full()
             .min_w_0()
             .flex()
@@ -543,8 +743,22 @@ impl Render for Notes {
             .gap_4()
             .bg(rgb(colors.bg))
             .capture_action(
+                cx.listener(|this, _: &crate::ui::CloseOverlay, window, cx| {
+                    if this.title_edit.is_some() || this.delete_note.is_some() {
+                        this.title_edit = None;
+                        this.delete_note = None;
+                        this.body.read(cx).focus_handle(cx).focus(window);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .capture_action(
                 cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
-                    if this.paste_image(cx) {
+                    if this.title_edit.is_none()
+                        && this.delete_note.is_none()
+                        && this.paste_image(cx)
+                    {
                         cx.stop_propagation();
                     }
                 }),
@@ -569,31 +783,16 @@ impl Render for Notes {
             )
             .child(tabs)
             .when(!self.library.notes.is_empty(), |s| {
-                s.child(Input::new(&self.title).h(px(44.)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .child(Input::new(&self.body).h_full()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                Button::new("paste-note-image")
-                                    .label(tr("粘贴图片"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if !this.paste_image(cx) {
-                                            this.status = tr("剪贴板中没有图片").into();
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(tr("Ctrl+V 粘贴图片，文字修改自动保存")),
-                    )
-                    .child(images)
+                s.child(
+                    div().flex_1().min_h_0().child(
+                        Input::new(&self.body)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false)
+                            .h_full(),
+                    ),
+                )
+                .child(images)
             })
             .when(self.library.notes.is_empty(), |s| {
                 s.child(
@@ -605,5 +804,9 @@ impl Render for Notes {
                         .child(tr("新建一条笔记，记录想法。")),
                 )
             })
+            .when(
+                self.title_edit.is_some() || self.delete_note.is_some(),
+                |s| s.child(self.note_dialog(cx)),
+            )
     }
 }
