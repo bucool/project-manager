@@ -864,6 +864,21 @@ impl Notes {
             let text_selected = self.selection_range().is_some_and(|selection| {
                 selection.start < start + range.end && selection.end > start + range.start
             });
+            // GPUI gives Img its intrinsic aspect ratio. Percentage dimensions can
+            // retain that intrinsic minimum when only the frame height shrinks.
+            // Constrain the image itself to the user's independent dimensions.
+            let render_image = |image: Img| {
+                image
+                    .w(px(size.width))
+                    .min_w(px(size.width))
+                    .max_w(px(size.width))
+                    .h(px(size.height))
+                    .min_h(px(size.height))
+                    .max_h(px(size.height))
+                    .flex_shrink_0()
+                    .object_fit(ObjectFit::Fill)
+                    .into_any_element()
+            };
             let image: AnyElement = if let Some((_, bytes)) =
                 self.pending_images.iter().find(|(file, _)| file == &name)
             {
@@ -883,28 +898,16 @@ impl Notes {
                     .entry(name.clone())
                     .or_insert_with(|| Arc::new(Image::from_bytes(format, bytes.clone())))
                     .clone();
-                img(source)
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Fill)
-                    .into_any_element()
+                render_image(img(source))
             } else if name.starts_with("https://") || name.starts_with("http://") {
-                img(SharedUri::from(name.clone()))
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Fill)
-                    .into_any_element()
+                render_image(img(SharedUri::from(name.clone())))
             } else if let Some(path) = self
                 .root
                 .as_ref()
                 .map(|root| root.join("notes-images").join(&name))
                 .filter(|path| path.is_file())
             {
-                img(path)
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Fill)
-                    .into_any_element()
+                render_image(img(path))
             } else {
                 div()
                     .text_color(rgb(0xc44b4b))
