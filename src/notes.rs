@@ -321,20 +321,7 @@ impl Notes {
                             this.editing = None;
                             cx.notify();
                         }
-                        InputEvent::PressEnter { .. } => {
-                            this.changed(cx);
-                            let value = this.body.read(cx).value();
-                            let heading = value.starts_with('#') && value.ends_with('\n');
-                            if (value.ends_with("\n\n") || heading)
-                                && !value.contains("```")
-                                && !value.contains("~~~")
-                            {
-                                if let Some(range) = &this.editing {
-                                    let end = range.end;
-                                    this.begin_edit(end..end, window, cx);
-                                }
-                            }
-                        }
+                        InputEvent::PressEnter { .. } => this.changed(cx),
                         _ => {}
                     },
                 ),
@@ -689,6 +676,25 @@ impl Notes {
         self.sync_image_fields(size, window, cx);
         self.document_focus.focus(window);
         cx.notify();
+    }
+    fn delete_selected_image(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((name, end)) = self.selected_image.clone() else {
+            return false;
+        };
+        let Some(note) = self.library.notes.get(self.library.active) else {
+            return false;
+        };
+        let Some((range, _)) = local_images(&note.body)
+            .into_iter()
+            .find(|(range, file)| file == &name && range.end == end)
+        else {
+            return false;
+        };
+        self.image_resize = None;
+        self.selected_image = None;
+        self.text_selection = Some((range.start, range.end));
+        // Remove this occurrence from the document. Cached files may be shared by other notes.
+        self.replace_selection("", window, cx)
     }
     fn apply_image_dimension(&mut self, width: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((name, _)) = self.selected_image.clone() else {
@@ -1054,7 +1060,7 @@ impl Notes {
             let selected = self
                 .selected_image
                 .as_ref()
-                .is_some_and(|(file, _)| file == &name);
+                .is_some_and(|(file, end)| file == &name && *end == start + range.end);
             let text_selected = self.selection_range().is_some_and(|selection| {
                 selection.start < start + range.end && selection.end > start + range.start
             });
@@ -1099,7 +1105,7 @@ impl Notes {
                     .into_any_element()
             };
             let image_end = start + range.end;
-            let insertion = start + source.len();
+            let insertion = start + range.end;
             let select_name = name.clone();
             let mut frame = div()
                 .id(SharedString::from(format!("note-picture-{image_end}")))
@@ -1131,7 +1137,7 @@ impl Notes {
                     if this
                         .selected_image
                         .as_ref()
-                        .is_none_or(|(file, _)| file != &select_name)
+                        .is_none_or(|(file, end)| file != &select_name || *end != insertion)
                     {
                         this.select_image(select_name.clone(), insertion, window, cx);
                     }
@@ -1194,6 +1200,48 @@ impl Notes {
         }
         block.into_any_element()
     }
+    fn blank_lines(
+        &self,
+        source: &str,
+        range: std::ops::Range<usize>,
+        skip_separator: bool,
+        trailing: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut lines = div().flex().flex_col().flex_shrink_0();
+        let whitespace = source.get(range.clone()).unwrap_or("");
+        for (index, _) in whitespace
+            .char_indices()
+            .filter(|(_, ch)| *ch == '\n')
+            .skip(usize::from(skip_separator))
+        {
+            let offset = range.start + index + usize::from(trailing);
+            lines = lines.child(
+                div()
+                    .id(SharedString::from(format!("note-blank-{offset}")))
+                    .h(px(self.library.font_size as f32 * 1.5))
+                    .flex_shrink_0()
+                    .cursor_text()
+                    .when(
+                        self.selection_range()
+                            .is_some_and(|range| range.contains(&offset)),
+                        |line| line.bg(rgb(self.colors.selected)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| {
+                            this.text_drag = None;
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.text_drag.is_some_and(|(_, dragged)| dragged) {
+                            this.begin_edit(offset..offset, window, cx);
+                        }
+                    })),
+            );
+        }
+        lines.into_any_element()
+    }
     fn document(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.text_layouts.borrow_mut().clear();
         *self.editor_bounds.borrow_mut() = None;
@@ -1229,9 +1277,21 @@ impl Notes {
             .track_scroll(&self.document_scroll)
             .track_focus(&self.document_focus)
             .flex()
-            .flex_col()
-            .gap_3();
+            .flex_col();
+        let mut previous_end = 0;
+        let mut has_block = false;
         for (range, active) in ranges {
+            if range.start > previous_end {
+                document = document.child(self.blank_lines(
+                    source,
+                    previous_end..range.start,
+                    has_block,
+                    false,
+                    cx,
+                ));
+            }
+            previous_end = previous_end.max(range.end);
+            has_block = true;
             if active {
                 let owner = cx.entity();
                 document = document.child(
@@ -1271,6 +1331,26 @@ impl Notes {
                         ),
                 );
             } else if let Some(value) = source.get(range.clone()) {
+                if value.trim().is_empty() {
+                    document = document.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "note-whitespace-{}",
+                                range.start
+                            )))
+                            .h(px(
+                                (value.bytes().filter(|byte| *byte == b'\n').count() + 1) as f32
+                                    * self.library.font_size as f32
+                                    * 1.5,
+                            ))
+                            .flex_shrink_0()
+                            .cursor_text()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_edit(range.clone(), window, cx);
+                            })),
+                    );
+                    continue;
+                }
                 let content = self.rendered_block(value, range.start, window, cx);
                 document = document.child(
                     div()
@@ -1292,6 +1372,15 @@ impl Notes {
                         })),
                 );
             }
+        }
+        if previous_end < source.len() {
+            document = document.child(self.blank_lines(
+                source,
+                previous_end..source.len(),
+                false,
+                true,
+                cx,
+            ));
         }
         let end = source.len();
         document = document.child(
@@ -1752,9 +1841,21 @@ impl Render for Notes {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.document_focus.is_focused(window)
+                    && (event.keystroke.key == "backspace" || event.keystroke.key == "delete")
+                    && this.delete_selected_image(window, cx)
+                {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    return;
+                }
                 if this.document_focus.is_focused(window) && this.selection_range().is_some() {
                     if event.keystroke.key == "backspace" || event.keystroke.key == "delete" {
                         this.replace_selection("", window, cx);
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    } else if event.keystroke.key == "enter" {
+                        this.replace_selection("\n", window, cx);
                         cx.stop_propagation();
                         window.prevent_default();
                     } else if !event.keystroke.modifiers.control
