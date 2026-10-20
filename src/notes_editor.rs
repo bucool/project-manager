@@ -1,6 +1,7 @@
 //! One native input handler, source buffer, selection and undo history per note.
 //! Rendered Markdown blocks are layout only; they never own editable text.
 use super::*;
+use crate::smooth_scroll::SmoothScroll;
 use std::{ops::Range, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 actions!(
@@ -21,6 +22,7 @@ struct History {
     group: Option<(Instant, usize, bool)>,
 }
 pub(super) struct EditorState {
+    pub scroll: SmoothScroll,
     histories: HashMap<String, History>,
     pub marked: Option<Range<usize>>,
     pub goal_x: Option<Pixels>,
@@ -39,6 +41,7 @@ pub(super) struct EditorState {
 impl Default for EditorState {
     fn default() -> Self {
         Self {
+            scroll: SmoothScroll::default(),
             histories: HashMap::new(),
             marked: None,
             goal_x: None,
@@ -80,6 +83,7 @@ impl Notes {
         (!range.is_empty()).then_some(range)
     }
     pub(super) fn editor_reset(&mut self) {
+        self.editor.scroll.cancel();
         self.text_selection = Some((0, 0));
         self.text_drag = None;
         self.selected_image = None;
@@ -91,6 +95,7 @@ impl Notes {
         self.editor.image_bounds.borrow_mut().clear();
     }
     pub(super) fn wake_caret(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.editor.scroll.cancel();
         self.editor.blink_on = true;
         self.editor.reveal = true;
         if self.editor.blink_task.is_none() {
@@ -806,8 +811,13 @@ impl Notes {
                 .absolute()
                 .inset_0(),
             )
+            .child(
+                self.editor
+                    .scroll
+                    .layer_with_line_height(self.document_scroll.clone(), px(112.)),
+            )
             .child(gpui_component::scroll::Scrollbar::vertical(
-                &self.document_scroll,
+                &self.editor.scroll.handle(&self.document_scroll),
             ))
             .into_any_element()
     }
