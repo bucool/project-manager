@@ -302,6 +302,8 @@ impl Notes {
         let image_width = cx.new(|cx| InputState::new(window, cx));
         let image_height = cx.new(|cx| InputState::new(window, cx));
         cx.bind_keys([
+            KeyBinding::new("backspace", gpui_component::input::Backspace, Some("Notes")),
+            KeyBinding::new("delete", gpui_component::input::Delete, Some("Notes")),
             KeyBinding::new("ctrl-a", gpui_component::input::SelectAll, Some("Notes")),
             KeyBinding::new("ctrl-c", gpui_component::input::Copy, Some("Notes")),
             KeyBinding::new("ctrl-x", gpui_component::input::Cut, Some("Notes")),
@@ -991,6 +993,25 @@ impl Notes {
         self.begin_edit(editing.clone(), window, cx);
         self.set_editor_cursor(cursor.saturating_sub(editing.start), window, cx);
         true
+    }
+    fn delete_document_content(
+        &mut self,
+        backward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.document_has_focus(window, cx) {
+            return false;
+        }
+        if self.document_focus.is_focused(window) {
+            if self.delete_selected_image(window, cx) {
+                return true;
+            }
+            if self.selection_range().is_some() {
+                return self.replace_selection("", window, cx);
+            }
+        }
+        self.delete_at_block_boundary(backward, window, cx)
     }
     fn delete_at_block_boundary(
         &mut self,
@@ -1934,6 +1955,22 @@ impl Render for Notes {
                 this.resize_image(event, window, cx);
                 this.move_text_selection(event, window, cx);
             }))
+            // GPUI dispatches bound actions before raw key events. Capture these
+            // before InputState consumes a no-op deletion at an empty block edge.
+            .capture_action(cx.listener(
+                |this, _: &gpui_component::input::Backspace, window, cx| {
+                    if this.delete_document_content(true, window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(
+                cx.listener(|this, _: &gpui_component::input::Delete, window, cx| {
+                    if this.delete_document_content(false, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .capture_action(cx.listener(
                 |this, _: &gpui_component::input::SelectAll, window, cx| {
                     if this.document_has_focus(window, cx) {
@@ -1958,30 +1995,8 @@ impl Render for Notes {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.document_focus.is_focused(window)
-                    && (event.keystroke.key == "backspace" || event.keystroke.key == "delete")
-                    && this.delete_selected_image(window, cx)
-                {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    return;
-                }
-                if !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.alt
-                    && (event.keystroke.key == "backspace" || event.keystroke.key == "delete")
-                    && this.delete_at_block_boundary(event.keystroke.key == "backspace", window, cx)
-                {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    return;
-                }
                 if this.document_focus.is_focused(window) && this.selection_range().is_some() {
-                    if event.keystroke.key == "backspace" || event.keystroke.key == "delete" {
-                        this.replace_selection("", window, cx);
-                        cx.stop_propagation();
-                        window.prevent_default();
-                    } else if event.keystroke.key == "enter" {
+                    if event.keystroke.key == "enter" {
                         this.replace_selection("\n", window, cx);
                         cx.stop_propagation();
                         window.prevent_default();
