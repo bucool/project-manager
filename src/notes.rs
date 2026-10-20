@@ -7,6 +7,8 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
 };
+#[path = "notes_editor.rs"]
+mod editor;
 #[path = "notes_text.rs"]
 mod text;
 use serde::{Deserialize, Serialize};
@@ -124,14 +126,27 @@ enum Command {
     Move(u64, PathBuf),
     Flush(mpsc::Sender<()>),
 }
-struct Writer(mpsc::Sender<Command>);
+struct Writer {
+    sender: mpsc::Sender<Command>,
+    notes: WeakEntity<Notes>,
+}
 impl Global for Writer {}
 pub fn flush(cx: &mut App) {
-    if let Some(writer) = cx.try_global::<Writer>() {
-        let (tx, rx) = mpsc::channel();
-        if writer.0.send(Command::Flush(tx)).is_ok() {
-            let _ = rx.recv_timeout(Duration::from_secs(10));
-        }
+    let Some(writer) = cx.try_global::<Writer>() else {
+        return;
+    };
+    let sender = writer.sender.clone();
+    let notes = writer.notes.clone();
+    if let Some(notes) = notes.upgrade() {
+        notes.update(cx, |notes, cx| {
+            if notes.editor.save_pending || notes.editor.marked.take().is_some() {
+                notes.persist(Vec::new(), cx);
+            }
+        });
+    }
+    let (tx, rx) = mpsc::channel();
+    if sender.send(Command::Flush(tx)).is_ok() {
+        let _ = rx.recv_timeout(Duration::from_secs(10));
     }
 }
 fn locator() -> Result<PathBuf> {
@@ -265,16 +280,14 @@ pub struct Notes {
     title_edit: Option<Option<String>>,
     dialog_focus: FocusHandle,
     font_settings_open: bool,
-    editing: Option<std::ops::Range<usize>>,
     document_scroll: ScrollHandle,
     document_focus: FocusHandle,
     text_selection: Option<(usize, usize)>,
     text_drag: Option<(Point<Pixels>, bool)>,
     text_layouts: RefCell<Vec<text::FragmentLayout>>,
-    editor_bounds: RefCell<Option<Bounds<Pixels>>>,
+    editor: editor::EditorState,
     delete_note: Option<String>,
     title: Entity<InputState>,
-    body: Entity<InputState>,
     image_width: Entity<InputState>,
     image_height: Entity<InputState>,
     selected_image: Option<(String, usize)>,
@@ -292,42 +305,29 @@ pub struct Notes {
     _subscriptions: Vec<Subscription>,
     pub colors: crate::theme::Colors,
 }
+impl Drop for Notes {
+    fn drop(&mut self) {
+        if self.editor.save_pending || self.editor.marked.is_some() {
+            if let Some(sender) = &self.sender {
+                let _ = sender.send(Command::Save(
+                    self.revision + 1,
+                    self.library.clone(),
+                    self.pending_images.clone(),
+                ));
+            }
+        }
+    }
+}
 impl Notes {
     pub fn count(&self) -> usize {
         self.library.notes.len()
     }
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx));
-        let body = cx.new(|cx| InputState::new(window, cx).auto_grow(1, 3000));
         let image_width = cx.new(|cx| InputState::new(window, cx));
         let image_height = cx.new(|cx| InputState::new(window, cx));
-        cx.bind_keys([
-            KeyBinding::new("backspace", gpui_component::input::Backspace, Some("Notes")),
-            KeyBinding::new("delete", gpui_component::input::Delete, Some("Notes")),
-            KeyBinding::new("ctrl-a", gpui_component::input::SelectAll, Some("Notes")),
-            KeyBinding::new("ctrl-c", gpui_component::input::Copy, Some("Notes")),
-            KeyBinding::new("ctrl-x", gpui_component::input::Cut, Some("Notes")),
-            KeyBinding::new("ctrl-v", gpui_component::input::Paste, Some("Notes")),
-        ]);
-        let mut subscriptions =
-            vec![
-                cx.subscribe_in(
-                    &body,
-                    window,
-                    |this, _, event: &InputEvent, window, cx| match event {
-                        InputEvent::Change => this.changed(cx),
-                        InputEvent::Blur
-                            if !this.body.read(cx).focus_handle(cx).is_focused(window) =>
-                        {
-                            this.changed(cx);
-                            this.editing = None;
-                            cx.notify();
-                        }
-                        InputEvent::PressEnter { .. } => this.changed(cx),
-                        _ => {}
-                    },
-                ),
-            ];
+        editor::bindings(cx);
+        let mut subscriptions = Vec::new();
         for (input, width) in [(&image_width, true), (&image_height, false)] {
             subscriptions.push(cx.subscribe_in(
                 input,
@@ -344,16 +344,14 @@ impl Notes {
             title_edit: None,
             dialog_focus: cx.focus_handle(),
             font_settings_open: false,
-            editing: None,
             document_scroll: ScrollHandle::new(),
             document_focus: cx.focus_handle(),
-            text_selection: None,
+            text_selection: Some((0, 0)),
             text_drag: None,
             text_layouts: RefCell::new(Vec::new()),
-            editor_bounds: RefCell::new(None),
+            editor: editor::EditorState::default(),
             delete_note: None,
             title,
-            body,
             image_width,
             image_height,
             selected_image: None,
@@ -417,7 +415,10 @@ impl Notes {
                 self.loaded = true;
                 let (tx, rx) = mpsc::channel();
                 let (events, receiver) = async_channel::unbounded();
-                cx.set_global(Writer(tx.clone()));
+                cx.set_global(Writer {
+                    sender: tx.clone(),
+                    notes: cx.entity().downgrade(),
+                });
                 self.sender = Some(tx);
                 std::thread::spawn(move || {
                     let mut root = root;
@@ -451,6 +452,7 @@ impl Notes {
                                     Ok(()) => {
                                         if revision == this.revision {
                                             this.pending_images.clear();
+                                            this.editor.pending_sources.borrow_mut().clear();
                                             this.failed = false;
                                             this.status = tr("已保存").into();
                                         }
@@ -487,6 +489,8 @@ impl Notes {
         }
     }
     fn persist(&mut self, images: Vec<(String, Vec<u8>)>, cx: &mut Context<Self>) {
+        self.editor.save_pending = false;
+        self.editor.save_task = None;
         self.pending_images.extend(images);
         if let Some(sender) = &self.sender {
             self.revision += 1;
@@ -509,71 +513,36 @@ impl Notes {
         self.library.font_size = size.clamp(10, 36);
         self.persist(Vec::new(), cx);
     }
-    fn changed(&mut self, cx: &mut Context<Self>) {
-        let Some(range) = self.editing.clone() else {
-            return;
-        };
-        let value = self.body.read(cx).value().to_string();
-        if let Some(note) = self.library.notes.get_mut(self.library.active) {
-            if range.end <= note.body.len()
-                && note.body.is_char_boundary(range.start)
-                && note.body.is_char_boundary(range.end)
-            {
-                if note.body[range.clone()] == value {
-                    return;
-                }
-                note.body.replace_range(range.clone(), &value);
-                self.editing = Some(range.start..range.start + value.len());
-                self.persist(Vec::new(), cx);
-            }
-        }
-    }
-    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editing.is_some() {
-            self.body.read(cx).focus_handle(cx).focus(window);
-        } else {
-            self.document_focus.focus(window);
-        }
-    }
-    fn begin_edit(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.finish_image_resize(cx);
-        self.selected_image = None;
-        self.text_selection = None;
-        self.text_drag = None;
-        let Some(note) = self.library.notes.get(self.library.active) else {
-            return;
-        };
-        let Some(value) = note.body.get(range.clone()).map(str::to_owned) else {
-            return;
-        };
-        self.editing = None;
-        self.body
-            .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
-        self.editing = Some(range);
-        self.set_editor_cursor(value.len(), window, cx);
-        cx.notify();
+    fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.document_focus.focus(window);
+        self.wake_caret(window, cx);
     }
     fn switch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_image_resize(cx);
-        self.selected_image = None;
-        self.text_selection = None;
-        self.text_drag = None;
-        self.editing = None;
-        self.document_scroll.set_offset(point(px(0.), px(0.)));
+        self.break_edit_group();
+        if let (Some(note), Some(selection)) = (
+            self.library.notes.get(self.library.active),
+            self.text_selection,
+        ) {
+            self.editor.selections.insert(note.id.clone(), selection);
+        }
+        if self.editor.marked.take().is_some() {
+            self.persist(Vec::new(), cx);
+        }
         if let Some(note) = self.library.notes.get(index).cloned() {
             self.library.active = index;
+            self.editor_reset();
+            self.text_selection = Some(
+                self.editor
+                    .selections
+                    .get(&note.id)
+                    .copied()
+                    .unwrap_or((0, 0)),
+            );
+            self.document_scroll.set_offset(point(px(0.), px(0.)));
             self.title
                 .update(cx, |input, cx| input.set_value(note.title, window, cx));
-            self.body
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            if note.body.is_empty() {
-                self.editing = Some(0..0);
-            }
+            self.focus_editor(window, cx);
         }
         cx.notify();
     }
@@ -656,35 +625,18 @@ impl Notes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.changed(cx);
-        self.editing = None;
-        self.text_selection = None;
+        self.break_edit_group();
+        self.text_selection = local_images(self.source())
+            .into_iter()
+            .find(|(range, file)| file == &name && range.end == insertion)
+            .map(|(range, _)| (range.start, range.end));
         self.text_drag = None;
         self.finish_image_resize(cx);
         let size = self.image_size(&name, window);
         self.selected_image = Some((name, insertion));
         self.sync_image_fields(size, window, cx);
         self.document_focus.focus(window);
-        cx.notify();
-    }
-    fn delete_selected_image(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some((name, end)) = self.selected_image.clone() else {
-            return false;
-        };
-        let Some(note) = self.library.notes.get(self.library.active) else {
-            return false;
-        };
-        let Some((range, _)) = local_images(&note.body)
-            .into_iter()
-            .find(|(range, file)| file == &name && range.end == end)
-        else {
-            return false;
-        };
-        self.image_resize = None;
-        self.selected_image = None;
-        self.text_selection = Some((range.start, range.end));
-        // Remove this occurrence from the document. Cached files may be shared by other notes.
-        self.replace_selection("", window, cx)
+        self.wake_caret(window, cx);
     }
     fn apply_image_dimension(&mut self, width: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((name, _)) = self.selected_image.clone() else {
@@ -720,6 +672,7 @@ impl Notes {
         let changed = (*dimension - value).abs() > 0.01;
         *dimension = value;
         if changed {
+            self.checkpoint(false);
             self.library.notes[self.library.active]
                 .image_sizes
                 .insert(name, size);
@@ -807,6 +760,7 @@ impl Notes {
                             let scale = (4096. / size.height).min(1.);
                             size.width *= scale;
                             size.height *= scale;
+                            this.checkpoint(false);
                             this.library.notes[this.library.active]
                                 .image_sizes
                                 .insert(name, size);
@@ -817,333 +771,31 @@ impl Notes {
             )
             .into_any_element()
     }
-    fn selection_range(&self) -> Option<std::ops::Range<usize>> {
-        let (anchor, end) = self.text_selection?;
-        (anchor != end).then_some(anchor.min(end)..anchor.max(end))
-    }
-    fn set_editor_cursor(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.body.read(cx).value();
-        let mut offset = offset.min(value.len());
-        while !value.is_char_boundary(offset) {
-            offset = offset.saturating_sub(1);
-        }
-        let prefix = &value[..offset];
-        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
-        let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() as u32;
-        self.body.update(cx, |input, cx| {
-            input.set_cursor_position(
-                gpui_component::input::Position::new(line, column),
-                window,
-                cx,
-            );
-        });
-    }
-    fn start_text_selection(
-        &mut self,
-        offset: usize,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.changed(cx);
-        self.editing = None;
-        self.selected_image = None;
-        let anchor = if event.modifiers.shift {
-            self.text_selection
-                .map(|(anchor, _)| anchor)
-                .unwrap_or(offset)
-        } else {
-            offset
-        };
-        self.text_selection = Some((anchor, offset));
-        self.text_drag = Some((event.position, false));
-        self.document_focus.focus(window);
-        cx.notify();
-    }
-    fn move_text_selection(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((origin, dragged)) = self.text_drag else {
-            return;
-        };
-        if !event.dragging() {
-            return;
-        }
-        let moved = f32::from(event.position.x - origin.x).abs()
-            + f32::from(event.position.y - origin.y).abs()
-            > 4.;
-        if !dragged && !moved {
-            return;
-        }
-        if self.editing.is_some() {
-            if self
-                .editor_bounds
-                .borrow()
-                .is_some_and(|bounds| bounds.contains(&event.position))
-            {
-                return;
-            }
-            self.changed(cx);
-            self.editing = None;
-            self.document_focus.focus(window);
-        }
-        let endpoint = {
-            let layouts = self.text_layouts.borrow();
-            layouts
-                .iter()
-                .min_by(|a, b| {
-                    let distance = |bounds: Bounds<Pixels>| {
-                        let y = f32::from(event.position.y);
-                        let top = f32::from(bounds.top());
-                        let bottom = f32::from(bounds.bottom());
-                        if y < top {
-                            top - y
-                        } else if y > bottom {
-                            y - bottom
-                        } else {
-                            0.
-                        }
-                    };
-                    distance(a.bounds()).total_cmp(&distance(b.bounds()))
-                })
-                .map(|layout| layout.source_at(event.position))
-        };
-        if let Some(endpoint) = endpoint {
-            if let Some((anchor, _)) = self.text_selection {
-                self.text_selection = Some((anchor, endpoint));
-                self.text_drag = Some((origin, true));
-                // Follow a drag beyond the visible document edge.
-                let height = f32::from(window.viewport_size().height);
-                let y = f32::from(event.position.y);
-                let delta = if y > height - 36. {
-                    -18.
-                } else if y < 190. {
-                    18.
-                } else {
-                    0.
-                };
-                if delta != 0. {
-                    let offset = self.document_scroll.offset();
-                    self.document_scroll
-                        .set_offset(point(offset.x, (offset.y + px(delta)).min(px(0.))));
-                }
-                cx.notify();
-            }
-        }
-    }
-    fn select_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.changed(cx);
-        self.editing = None;
-        self.selected_image = None;
-        self.text_drag = None;
-        let end = self
-            .library
-            .notes
-            .get(self.library.active)
-            .map(|note| note.body.len())
-            .unwrap_or(0);
-        self.text_selection = Some((0, end));
-        self.document_focus.focus(window);
-        cx.notify();
-    }
-    fn document_has_focus(&self, window: &Window, cx: &App) -> bool {
-        self.title_edit.is_none()
-            && self.delete_note.is_none()
-            && (self.document_focus.is_focused(window)
-                || self.body.read(cx).focus_handle(cx).is_focused(window))
-    }
-    fn copy_selection(&self, cx: &mut Context<Self>) -> bool {
-        let Some(range) = self.selection_range() else {
-            return false;
-        };
-        let Some(note) = self.library.notes.get(self.library.active) else {
-            return false;
-        };
-        let content = text::Content::parse(&note.body, 0);
-        cx.write_to_clipboard(ClipboardItem::new_string(content.selected_text(&range)));
-        true
-    }
-    fn replace_selection(
-        &mut self,
-        value: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(range) = self.selection_range() else {
-            return false;
-        };
-        let Some(note) = self.library.notes.get_mut(self.library.active) else {
-            return false;
-        };
-        if note.body.get(range.clone()).is_none() {
-            return false;
-        }
-        note.body.replace_range(range.clone(), value);
-        let cursor = range.start + value.len();
-        self.text_selection = None;
-        self.text_drag = None;
-        self.persist(Vec::new(), cx);
-        let editing = markdown_blocks(&self.library.notes[self.library.active].body)
-            .into_iter()
-            .find(|range| range.start <= cursor && cursor <= range.end)
-            .unwrap_or(cursor..cursor);
-        self.begin_edit(editing.clone(), window, cx);
-        self.set_editor_cursor(cursor.saturating_sub(editing.start), window, cx);
-        true
-    }
-    fn delete_document_content(
-        &mut self,
-        backward: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.document_has_focus(window, cx) {
-            return false;
-        }
-        if self.document_focus.is_focused(window) {
-            if self.delete_selected_image(window, cx) {
-                return true;
-            }
-            if self.selection_range().is_some() {
-                return self.replace_selection("", window, cx);
-            }
-        }
-        self.delete_at_block_boundary(backward, window, cx)
-    }
-    fn delete_at_block_boundary(
-        &mut self,
-        backward: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.document_has_focus(window, cx) {
-            return false;
-        }
-        let cursor = if self.body.read(cx).focus_handle(cx).is_focused(window) {
-            let Some(editing) = self.editing.clone() else {
-                return false;
-            };
-            let (offset, length, selected, composing) = self.body.update(cx, |input, cx| {
+    fn render_text(&self, source: &str, base: usize, cx: &mut Context<Self>) -> AnyElement {
+        let content = {
+            let mut cache = self.editor.content.borrow_mut();
+            let entry = cache.entry(base).or_insert_with(|| {
                 (
-                    input.cursor(),
-                    input.value().len(),
-                    input
-                        .selected_text_range(false, window, cx)
-                        .is_some_and(|selection| !selection.range.is_empty()),
-                    input.marked_text_range(window, cx).is_some(),
+                    source.to_owned(),
+                    if source.trim().is_empty() {
+                        text::Content::plain(source, base)
+                    } else {
+                        text::Content::parse(source, base)
+                    },
                 )
             });
-            // Inside a paragraph, native input handles selections, graphemes and IME.
-            if selected || composing || (backward && offset != 0) || (!backward && offset != length)
-            {
-                return false;
-            }
-            editing.start + offset
-        } else {
-            let Some((anchor, end)) = self.text_selection else {
-                return false;
-            };
-            if anchor != end {
-                return false;
-            }
-            end
-        };
-        self.changed(cx);
-        let Some(note) = self.library.notes.get(self.library.active) else {
-            return false;
-        };
-        if !note.body.is_char_boundary(cursor) {
-            return false;
-        }
-        // An adjacent image is an object, not individual Markdown punctuation.
-        if let Some((range, name)) = local_images(&note.body).into_iter().find(|(range, _)| {
-            if backward {
-                range.end == cursor
-            } else {
-                range.start == cursor
-            }
-        }) {
-            self.select_image(name, range.end, window, cx);
-            return true;
-        }
-        let removal = if backward {
-            note.body[..cursor]
-                .char_indices()
-                .next_back()
-                .map(|(start, ch)| {
-                    let start = if ch == '\n' && note.body[..start].ends_with('\r') {
-                        start - 1
+            if entry.0 != source {
+                *entry = (
+                    source.to_owned(),
+                    if source.trim().is_empty() {
+                        text::Content::plain(source, base)
                     } else {
-                        start
-                    };
-                    (start..cursor, ch)
-                })
-        } else {
-            note.body[cursor..].chars().next().map(|ch| {
-                let length = if note.body[cursor..].starts_with("\r\n") {
-                    2
-                } else {
-                    ch.len_utf8()
-                };
-                (cursor..cursor + length, ch)
-            })
-        };
-        let Some((removal, ch)) = removal else {
-            return false;
-        };
-        if !ch.is_whitespace() {
-            let block = markdown_blocks(&note.body).into_iter().find(|range| {
-                if backward {
-                    range.start < cursor && cursor <= range.end
-                } else {
-                    range.start <= cursor && cursor < range.end
-                }
-            });
-            if let Some(block) = block {
-                self.begin_edit(block.clone(), window, cx);
-                self.set_editor_cursor(cursor - block.start, window, cx);
-                let action: Box<dyn Action> = if backward {
-                    Box::new(gpui_component::input::Backspace)
-                } else {
-                    Box::new(gpui_component::input::Delete)
-                };
-                window.dispatch_action(action, cx);
-                return true;
+                        text::Content::parse(source, base)
+                    },
+                );
             }
-            return false;
-        }
-        let cursor = removal.start;
-        self.library.notes[self.library.active]
-            .body
-            .replace_range(removal, "");
-        self.editing = None;
-        self.selected_image = None;
-        self.text_selection = Some((cursor, cursor));
-        self.text_drag = None;
-        self.persist(Vec::new(), cx);
-        let note = &self.library.notes[self.library.active];
-        let line_start = note.body[..cursor]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let line_end = note.body[cursor..]
-            .find('\n')
-            .map(|index| cursor + index)
-            .unwrap_or(note.body.len());
-        if note.body[line_start..line_end].trim().is_empty() {
-            self.begin_edit(cursor..cursor, window, cx);
-        } else {
-            // Once the real blank line is gone, do not leave an empty input row behind.
-            self.document_focus.focus(window);
-        }
-        cx.notify();
-        true
-    }
-    fn render_text(&self, source: &str, base: usize, cx: &mut Context<Self>) -> AnyElement {
-        let content = text::Content::parse(source, base);
+            entry.1.clone()
+        };
         let font_size = self.library.font_size as f32;
         let size = match content.heading {
             Some(1) => font_size * 1.9,
@@ -1224,7 +876,14 @@ impl Notes {
                     "svg" => ImageFormat::Svg,
                     _ => ImageFormat::Png,
                 };
-                img(Arc::new(Image::from_bytes(format, bytes.clone())))
+                let source = self
+                    .editor
+                    .pending_sources
+                    .borrow_mut()
+                    .entry(name.clone())
+                    .or_insert_with(|| Arc::new(Image::from_bytes(format, bytes.clone())))
+                    .clone();
+                img(source)
                     .w_full()
                     .h_full()
                     .object_fit(ObjectFit::Fill)
@@ -1290,6 +949,23 @@ impl Notes {
                         this.select_image(select_name.clone(), insertion, window, cx);
                     }
                 }));
+            let image_range = start + range.start..start + range.end;
+            let owner = cx.entity();
+            frame = frame.child(
+                canvas(
+                    |bounds, _, _| bounds,
+                    move |bounds, _, _, cx| {
+                        let notes = owner.read(cx);
+                        notes
+                            .editor
+                            .image_bounds
+                            .borrow_mut()
+                            .insert(image_range.start, (image_range.clone(), bounds));
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
             if selected {
                 let positions = [
                     (0., 0.),
@@ -1328,6 +1004,7 @@ impl Notes {
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                     cx.stop_propagation();
                                     window.prevent_default();
+                                    this.checkpoint(false);
                                     this.image_resize = Some(ImageResize {
                                         name: drag_name.clone(),
                                         origin: event.position,
@@ -1357,226 +1034,6 @@ impl Notes {
             }
         }
         block.into_any_element()
-    }
-    fn blank_lines(
-        &self,
-        source: &str,
-        range: std::ops::Range<usize>,
-        skip_separator: bool,
-        trailing: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut lines = div().flex().flex_col().flex_shrink_0();
-        let whitespace = source.get(range.clone()).unwrap_or("");
-        for (index, _) in whitespace
-            .char_indices()
-            .filter(|(_, ch)| *ch == '\n')
-            .skip(usize::from(skip_separator))
-        {
-            let offset = range.start + index + usize::from(trailing);
-            lines = lines.child(
-                div()
-                    .id(SharedString::from(format!("note-blank-{offset}")))
-                    .h(px(self.library.font_size as f32 * 1.5))
-                    .flex_shrink_0()
-                    .cursor_text()
-                    .when(
-                        self.selection_range()
-                            .is_some_and(|range| range.contains(&offset)),
-                        |line| line.bg(rgb(self.colors.selected)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| {
-                            this.text_drag = None;
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if !this.text_drag.is_some_and(|(_, dragged)| dragged) {
-                            this.begin_edit(offset..offset, window, cx);
-                        }
-                    })),
-            );
-        }
-        lines.into_any_element()
-    }
-    fn document(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.text_layouts.borrow_mut().clear();
-        *self.editor_bounds.borrow_mut() = None;
-        let source = self
-            .library
-            .notes
-            .get(self.library.active)
-            .map(|note| note.body.as_str())
-            .unwrap_or("");
-        let mut ranges = Vec::new();
-        let mut inserted = false;
-        for range in markdown_blocks(source) {
-            if let Some(editing) = &self.editing {
-                if !inserted && range.start >= editing.start {
-                    ranges.push((editing.clone(), true));
-                    inserted = true;
-                }
-                if range.start < editing.end && range.end > editing.start {
-                    continue;
-                }
-            }
-            ranges.push((range, false));
-        }
-        if let Some(editing) = &self.editing {
-            if !inserted {
-                ranges.push((editing.clone(), true));
-            }
-        }
-        let mut document = div()
-            .id("note-document-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.document_scroll)
-            .track_focus(&self.document_focus)
-            .flex()
-            .flex_col();
-        let mut previous_end = 0;
-        let mut has_block = false;
-        for (range, active) in ranges {
-            if range.start > previous_end {
-                document = document.child(self.blank_lines(
-                    source,
-                    previous_end..range.start,
-                    has_block,
-                    false,
-                    cx,
-                ));
-            }
-            previous_end = previous_end.max(range.end);
-            has_block = true;
-            if active {
-                let owner = cx.entity();
-                document = document.child(
-                    div()
-                        .relative()
-                        .flex_shrink_0()
-                        .child(
-                            Input::new(&self.body)
-                                .appearance(false)
-                                .bordered(false)
-                                .focus_bordered(false)
-                                .text_size(px(self.library.font_size as f32))
-                                .p_0(),
-                        )
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, _, cx| {
-                                    *owner.read(cx).editor_bounds.borrow_mut() = Some(bounds);
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, event: &MouseDownEvent, window, cx| {
-                                let position = event.position;
-                                cx.defer_in(window, move |this, _, cx| {
-                                    if let Some(range) = &this.editing {
-                                        let anchor = range.start + this.body.read(cx).cursor();
-                                        this.text_selection = Some((anchor, anchor));
-                                        this.text_drag = Some((position, false));
-                                    }
-                                });
-                            }),
-                        ),
-                );
-            } else if let Some(value) = source.get(range.clone()) {
-                if value.trim().is_empty() {
-                    document = document.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "note-whitespace-{}",
-                                range.start
-                            )))
-                            .h(px(
-                                (value.bytes().filter(|byte| *byte == b'\n').count() + 1) as f32
-                                    * self.library.font_size as f32
-                                    * 1.5,
-                            ))
-                            .flex_shrink_0()
-                            .cursor_text()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_edit(range.clone(), window, cx);
-                            })),
-                    );
-                    continue;
-                }
-                let content = self.rendered_block(value, range.start, window, cx);
-                document = document.child(
-                    div()
-                        .id(SharedString::from(format!("note-block-{}", range.start)))
-                        .flex_shrink_0()
-                        .min_h(px(self.library.font_size as f32 * 1.5))
-                        .cursor_text()
-                        .child(content)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.text_drag.is_some_and(|(_, dragged)| dragged)
-                                || this.selection_range().is_some()
-                            {
-                                return;
-                            }
-                            let offset =
-                                this.text_selection.map(|(_, end)| end).unwrap_or(range.end);
-                            this.begin_edit(range.clone(), window, cx);
-                            this.set_editor_cursor(offset.saturating_sub(range.start), window, cx);
-                        })),
-                );
-            }
-        }
-        if previous_end < source.len() {
-            document = document.child(self.blank_lines(
-                source,
-                previous_end..source.len(),
-                false,
-                true,
-                cx,
-            ));
-        }
-        let end = source.len();
-        document = document.child(
-            div()
-                .id("note-document-end")
-                .min_h(px(1.))
-                .flex_1()
-                .cursor_text()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| {
-                        this.text_drag = None;
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.text_drag.is_some_and(|(_, dragged)| dragged) {
-                        return;
-                    }
-                    let mut end = end;
-                    if let Some(note) = this.library.notes.get_mut(this.library.active) {
-                        if !note.body.is_empty() && !note.body.ends_with("\n\n") {
-                            note.body.push_str("\n\n");
-                            end = note.body.len();
-                            this.persist(Vec::new(), cx);
-                        }
-                    }
-                    this.begin_edit(end..end, window, cx);
-                })),
-        );
-        div()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .child(document)
-            .child(gpui_component::scroll::Scrollbar::vertical(
-                &self.document_scroll,
-            ))
-            .into_any_element()
     }
     fn edit_title(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (id, title) = if create {
@@ -1620,6 +1077,9 @@ impl Notes {
             return;
         };
         if let Some(index) = self.library.notes.iter().position(|n| n.id == id) {
+            if index == self.library.active {
+                self.text_selection = None;
+            }
             let removed = self.library.notes.remove(index);
             self.pending_images
                 .retain(|(name, _)| !removed.images.contains(name));
@@ -1782,70 +1242,31 @@ impl Notes {
         if images.is_empty() {
             return false;
         }
-        if let Some(range) = self.selection_range() {
-            self.library.notes[self.library.active]
-                .body
-                .replace_range(range.clone(), "");
-            self.begin_edit(range.start..range.start, window, cx);
-        }
-        if self.editing.is_none() {
-            let end = self
-                .selected_image
-                .as_ref()
-                .map(|(_, position)| *position)
-                .unwrap_or(self.library.notes[self.library.active].body.len());
-            self.begin_edit(end..end, window, cx);
-        }
-        let markdown = images
-            .iter()
-            .map(|(name, _)| format!("![image](notes-images/{name})"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.changed(cx);
-        let (selection_start, selection_end) = self.body.update(cx, |input, cx| {
-            let value = input.value();
-            let to_byte = |offset: usize| {
-                let mut units = 0;
-                for (index, ch) in value.char_indices() {
-                    if units >= offset {
-                        return index;
-                    }
-                    units += ch.len_utf16();
-                }
-                value.len()
-            };
-            input
-                .selected_text_range(false, window, cx)
-                .map(|selection| (to_byte(selection.range.start), to_byte(selection.range.end)))
-                .unwrap_or((input.cursor(), input.cursor()))
-        });
-        let block_start = self.editing.as_ref().map(|range| range.start).unwrap_or(0);
-        let note = &self.library.notes[self.library.active];
-        let before = &note.body[..block_start + selection_start];
-        let after = &note.body[block_start + selection_end..];
-        // Add only a line separator when needed; never manufacture blank paragraphs.
+        let range = self.selection();
+        let before = &self.source()[..range.start];
+        let after = &self.source()[range.end..];
         let prefix = if before.is_empty() || before.ends_with('\n') {
             ""
         } else {
             "\n"
         };
-        let suffix = if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") {
+        let suffix = if after.is_empty() || after.starts_with('\n') {
             ""
         } else {
             "\n"
         };
+        let markdown = images
+            .iter()
+            .map(|(name, _)| format!("![image](notes-images/{name})"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let insertion = format!("{prefix}{markdown}{suffix}");
-        self.body.update(cx, |input, cx| {
-            input.replace(insertion, window, cx);
-            cx.notify();
-        });
-        self.changed(cx);
-        self.editing = None;
-        self.document_focus.focus(window);
+        self.pending_images.extend(images.iter().cloned());
         self.library.notes[self.library.active]
             .images
             .extend(images.iter().map(|(name, _)| name.clone()));
-        self.persist(images, cx);
+        self.edit_range(range, &insertion, false, window, cx);
+        self.document_focus.focus(window);
         true
     }
     fn choose(&mut self, cx: &mut Context<Self>) {
@@ -1996,7 +1417,6 @@ impl Render for Notes {
         );
         div()
             .relative()
-            .key_context("Notes")
             .size_full()
             .min_w_0()
             .flex()
@@ -2007,75 +1427,19 @@ impl Render for Notes {
             .bg(rgb(colors.bg))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resize_image(event, window, cx);
-                this.move_text_selection(event, window, cx);
-            }))
-            // GPUI dispatches bound actions before raw key events. Capture these
-            // before InputState consumes a no-op deletion at an empty block edge.
-            .capture_action(cx.listener(
-                |this, _: &gpui_component::input::Backspace, window, cx| {
-                    if this.delete_document_content(true, window, cx) {
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .capture_action(
-                cx.listener(|this, _: &gpui_component::input::Delete, window, cx| {
-                    if this.delete_document_content(false, window, cx) {
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .capture_action(cx.listener(
-                |this, _: &gpui_component::input::SelectAll, window, cx| {
-                    if this.document_has_focus(window, cx) {
-                        this.select_document(window, cx);
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .capture_action(
-                cx.listener(|this, _: &gpui_component::input::Copy, window, cx| {
-                    if this.document_has_focus(window, cx) && this.copy_selection(cx) {
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .capture_action(
-                cx.listener(|this, _: &gpui_component::input::Cut, window, cx| {
-                    if this.document_has_focus(window, cx) && this.copy_selection(cx) {
-                        this.replace_selection("", window, cx);
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.document_focus.is_focused(window) && this.selection_range().is_some() {
-                    if event.keystroke.key == "enter" {
-                        this.replace_selection("\n", window, cx);
-                        cx.stop_propagation();
-                        window.prevent_default();
-                    } else if !event.keystroke.modifiers.control
-                        && !event.keystroke.modifiers.platform
-                        && !event.keystroke.modifiers.alt
-                    {
-                        if let Some(value) = &event.keystroke.key_char {
-                            this.replace_selection(value, window, cx);
-                            cx.stop_propagation();
-                            window.prevent_default();
-                        }
-                    }
-                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_image_resize(cx);
+                    this.text_drag = None;
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_image_resize(cx);
+                    this.text_drag = None;
                 }),
             )
             .capture_action(
@@ -2086,24 +1450,6 @@ impl Render for Notes {
                         this.focus_editor(window, cx);
                         cx.stop_propagation();
                         cx.notify();
-                    }
-                }),
-            )
-            .capture_action(
-                cx.listener(|this, _: &gpui_component::input::Paste, window, cx| {
-                    if this.title_edit.is_none()
-                        && this.delete_note.is_none()
-                        && this.document_has_focus(window, cx)
-                    {
-                        if this.paste_image(window, cx) {
-                            cx.stop_propagation();
-                        } else if let Some(value) =
-                            cx.read_from_clipboard().and_then(|item| item.text())
-                        {
-                            if this.replace_selection(&value, window, cx) {
-                                cx.stop_propagation();
-                            }
-                        }
                     }
                 }),
             )

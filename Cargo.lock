@@ -4317,6 +4317,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "unicode-segmentation",
  "ureq",
  "url",
  "webview2-com",

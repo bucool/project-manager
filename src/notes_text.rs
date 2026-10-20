@@ -3,6 +3,7 @@ use super::Notes;
 use gpui::{prelude::*, *};
 use markdown::mdast::Node;
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 struct Glyph {
@@ -18,11 +19,13 @@ pub(super) struct Content {
     pub heading: Option<u8>,
     pub code: bool,
     links: Vec<(Range<usize>, String)>,
+    range: Range<usize>,
 }
 
 impl Content {
     pub fn parse(source: &str, base: usize) -> Self {
         let mut content = Self::default();
+        content.range = base..base + source.len();
         if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
             content.visit(&root, source, base, HighlightStyle::default());
         } else {
@@ -34,7 +37,41 @@ impl Content {
         content
             .glyphs
             .retain(|glyph| glyph.display.end <= content.text.len());
+        if content.text.is_empty() {
+            let end = base + source.len();
+            content.append("\u{200b}", end..end, HighlightStyle::default());
+        }
         content
+    }
+    pub fn blank(offset: usize) -> Self {
+        let mut content = Self {
+            range: offset..offset,
+            ..Default::default()
+        };
+        content.append("\u{200b}", offset..offset, HighlightStyle::default());
+        content
+    }
+    pub fn plain(source: &str, base: usize) -> Self {
+        let mut content = Self {
+            range: base..base + source.len(),
+            ..Default::default()
+        };
+        content.append(source, base..base + source.len(), HighlightStyle::default());
+        if source.is_empty() {
+            content.append("\u{200b}", base..base, HighlightStyle::default());
+        }
+        content
+    }
+    pub fn all_text_covered(&self, range: &Range<usize>) -> bool {
+        let visible: Vec<_> = self
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.source.is_empty())
+            .collect();
+        !visible.is_empty()
+            && visible
+                .iter()
+                .all(|glyph| range.start <= glyph.source.start && glyph.source.end <= range.end)
     }
 
     fn append(&mut self, value: &str, source: Range<usize>, style: HighlightStyle) {
@@ -140,7 +177,12 @@ impl Content {
             let raw = source
                 .get(range.start.saturating_sub(base)..range.end.saturating_sub(base))
                 .unwrap_or("");
-            if let Some(offset) = raw.find(value) {
+            let skip = match node {
+                Node::Code(_) => raw.find('\n').map(|index| index + 1).unwrap_or(0),
+                Node::InlineCode(_) => raw.bytes().take_while(|byte| *byte == b'`').count(),
+                _ => 0,
+            };
+            if let Some(offset) = raw[skip..].find(value).map(|offset| skip + offset) {
                 self.append(
                     value,
                     range.start + offset..range.start + offset + value.len(),
@@ -192,17 +234,6 @@ impl Content {
             .or_else(|| self.glyphs.last().map(|glyph| glyph.source.end))
             .unwrap_or(0)
     }
-
-    pub fn selected_text(&self, selection: &Range<usize>) -> String {
-        self.glyphs
-            .iter()
-            .filter(|glyph| {
-                glyph.source.end > selection.start && glyph.source.start < selection.end
-                    || glyph.source.is_empty() && selection.contains(&glyph.source.start)
-            })
-            .map(|glyph| &self.text[glyph.display.clone()])
-            .collect()
-    }
 }
 
 #[derive(Clone)]
@@ -213,6 +244,71 @@ pub(super) struct FragmentLayout {
 }
 
 impl FragmentLayout {
+    pub fn deletion_range(&self, source: usize, backward: bool) -> Option<Range<usize>> {
+        if source < self.content.range.start
+            || source > self.content.range.end
+            || self.content.range.is_empty()
+        {
+            return None;
+        }
+        let mut index = self.content.text.len();
+        for glyph in &self.content.glyphs {
+            if source <= glyph.source.start {
+                index = glyph.display.start;
+                break;
+            }
+            if source <= glyph.source.end {
+                index = glyph.display.end;
+                break;
+            }
+        }
+        let display = if backward {
+            self.content.text[..index].grapheme_indices(true).last()?.0..index
+        } else {
+            index..index + self.content.text[index..].graphemes(true).next()?.len()
+        };
+        let mut glyphs = self.content.glyphs.iter().filter(|glyph| {
+            glyph.display.start < display.end
+                && glyph.display.end > display.start
+                && !glyph.source.is_empty()
+        });
+        let first = glyphs.next()?;
+        let mut range = first.source.clone();
+        for glyph in glyphs {
+            range.start = range.start.min(glyph.source.start);
+            range.end = range.end.max(glyph.source.end);
+        }
+        Some(range)
+    }
+    pub fn move_source(&self, source: usize, backward: bool) -> Option<usize> {
+        if source < self.content.range.start
+            || source > self.content.range.end
+            || self.content.range.is_empty()
+        {
+            return None;
+        }
+        let mut index = self.content.text.len();
+        for glyph in &self.content.glyphs {
+            if source <= glyph.source.start {
+                index = glyph.display.start;
+                break;
+            }
+            if source <= glyph.source.end {
+                index = glyph.display.end;
+                break;
+            }
+        }
+        let target = if backward {
+            self.content.text[..index]
+                .grapheme_indices(true)
+                .last()
+                .map(|(i, _)| i)?
+        } else {
+            index + self.content.text[index..].graphemes(true).next()?.len()
+        };
+        let offset = self.content.source_at(target);
+        (offset != source).then_some(offset)
+    }
     pub fn bounds(&self) -> Bounds<Pixels> {
         self.layout.bounds()
     }
@@ -222,6 +318,30 @@ impl FragmentLayout {
             .index_for_position(position)
             .unwrap_or_else(|index| index);
         self.content.source_at(index)
+    }
+    pub fn line_height(&self) -> Pixels {
+        self.layout.line_height()
+    }
+    pub fn position_for_source(&self, source: usize) -> Option<Point<Pixels>> {
+        if source < self.content.range.start || source > self.content.range.end {
+            return None;
+        }
+        let mut index = self.content.text.len();
+        for glyph in &self.content.glyphs {
+            if source <= glyph.source.start {
+                index = glyph.display.start;
+                break;
+            }
+            if source <= glyph.source.end {
+                index = glyph.display.end;
+                break;
+            }
+        }
+        // Zero-width blank-line glyphs have their caret at the start of the line.
+        if self.content.range.is_empty() {
+            index = 0;
+        }
+        self.layout.position_for_index(index)
     }
 }
 
@@ -274,6 +394,21 @@ impl Element for SelectableText {
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
         for glyph in &self.content.glyphs {
             let mut style = glyph.style;
+            if self
+                .notes
+                .read(cx)
+                .editor
+                .marked
+                .as_ref()
+                .is_some_and(|range| {
+                    glyph.source.end > range.start && glyph.source.start < range.end
+                })
+            {
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    ..Default::default()
+                });
+            }
             if self.selection.as_ref().is_some_and(|selection| {
                 glyph.source.end > selection.start && glyph.source.start < selection.end
                     || glyph.source.is_empty() && selection.contains(&glyph.source.start)
