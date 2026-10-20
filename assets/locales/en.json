@@ -283,5 +283,8 @@
   "缩小字号": "Decrease font size",
   "放大字号": "Increase font size",
   "恢复默认": "Reset to default",
-  "图片文件不存在": "Image file not found"
+  "图片文件不存在": "Image file not found",
+  "宽": "Width",
+  "高": "Height",
+  "恢复原始比例": "Restore original aspect ratio"
 }

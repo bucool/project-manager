@@ -10,8 +10,10 @@ use gpui_component::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     fs,
-    io::Write,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -73,6 +75,19 @@ struct Note {
     body: String,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    image_sizes: HashMap<String, ImageSize>,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct ImageSize {
+    width: f32,
+    height: f32,
+}
+struct ImageResize {
+    name: String,
+    origin: Point<Pixels>,
+    original: ImageSize,
+    handle: usize,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Library {
@@ -248,6 +263,11 @@ pub struct Notes {
     delete_note: Option<String>,
     title: Entity<InputState>,
     body: Entity<InputState>,
+    image_width: Entity<InputState>,
+    image_height: Entity<InputState>,
+    selected_image: Option<(String, usize)>,
+    image_resize: Option<ImageResize>,
+    intrinsic_sizes: RefCell<HashMap<String, ImageSize>>,
     root: Option<PathBuf>,
     sender: Option<mpsc::Sender<Command>>,
     revision: u64,
@@ -267,7 +287,9 @@ impl Notes {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx));
         let body = cx.new(|cx| InputState::new(window, cx).auto_grow(1, 3000));
-        let subscriptions =
+        let image_width = cx.new(|cx| InputState::new(window, cx));
+        let image_height = cx.new(|cx| InputState::new(window, cx));
+        let mut subscriptions =
             vec![
                 cx.subscribe_in(
                     &body,
@@ -299,6 +321,17 @@ impl Notes {
                     },
                 ),
             ];
+        for (input, width) in [(&image_width, true), (&image_height, false)] {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.apply_image_dimension(width, window, cx);
+                    }
+                },
+            ));
+        }
         Self {
             library: Library::default(),
             title_edit: None,
@@ -310,6 +343,11 @@ impl Notes {
             delete_note: None,
             title,
             body,
+            image_width,
+            image_height,
+            selected_image: None,
+            image_resize: None,
+            intrinsic_sizes: RefCell::new(HashMap::new()),
             root: None,
             sender: None,
             revision: 0,
@@ -492,6 +530,8 @@ impl Notes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.finish_image_resize(cx);
+        self.selected_image = None;
         let Some(note) = self.library.notes.get(self.library.active) else {
             return;
         };
@@ -518,6 +558,8 @@ impl Notes {
         cx.notify();
     }
     fn switch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_image_resize(cx);
+        self.selected_image = None;
         self.editing = None;
         self.document_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(note) = self.library.notes.get(index).cloned() {
@@ -531,6 +573,219 @@ impl Notes {
             }
         }
         cx.notify();
+    }
+    fn natural_image_size(&self, name: &str) -> ImageSize {
+        if let Some(size) = self.intrinsic_sizes.borrow().get(name) {
+            return *size;
+        }
+        // Read image headers once, rather than decoding the image on every drag frame.
+        let dimensions =
+            if let Some((_, bytes)) = self.pending_images.iter().find(|(file, _)| file == name) {
+                image::ImageReader::new(Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+            } else {
+                self.root.as_ref().and_then(|root| {
+                    image::image_dimensions(root.join("notes-images").join(name)).ok()
+                })
+            };
+        let (width, height) = dimensions.unwrap_or((640, 480));
+        let size = ImageSize {
+            width: width.max(1) as f32,
+            height: height.max(1) as f32,
+        };
+        self.intrinsic_sizes
+            .borrow_mut()
+            .insert(name.to_owned(), size);
+        size
+    }
+    fn image_size(&self, name: &str, window: &Window) -> ImageSize {
+        let available = (f32::from(window.viewport_size().width) - 300.).max(100.);
+        if let Some(size) = self
+            .library
+            .notes
+            .get(self.library.active)
+            .and_then(|note| note.image_sizes.get(name))
+        {
+            if size.width.is_finite()
+                && size.height.is_finite()
+                && size.width > 0.
+                && size.height > 0.
+            {
+                let mut size = ImageSize {
+                    width: size.width.clamp(16., 4096.),
+                    height: size.height.clamp(16., 4096.),
+                };
+                let scale = (available / size.width).min(1.);
+                size.width *= scale;
+                size.height *= scale;
+                return size;
+            }
+        }
+        let natural = self.natural_image_size(name);
+        let scale = (available / natural.width)
+            .min(720. / natural.height)
+            .min(1.);
+        ImageSize {
+            width: natural.width * scale,
+            height: natural.height * scale,
+        }
+    }
+    fn sync_image_fields(&mut self, size: ImageSize, window: &mut Window, cx: &mut Context<Self>) {
+        self.image_width.update(cx, |input, cx| {
+            input.set_value(format!("{:.0}", size.width), window, cx)
+        });
+        self.image_height.update(cx, |input, cx| {
+            input.set_value(format!("{:.0}", size.height), window, cx)
+        });
+    }
+    fn select_image(
+        &mut self,
+        name: String,
+        insertion: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.changed(cx);
+        self.editing = None;
+        self.finish_image_resize(cx);
+        let size = self.image_size(&name, window);
+        self.selected_image = Some((name, insertion));
+        self.sync_image_fields(size, window, cx);
+        self.document_focus.focus(window);
+        cx.notify();
+    }
+    fn apply_image_dimension(&mut self, width: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, _)) = self.selected_image.clone() else {
+            return;
+        };
+        let input = if width {
+            &self.image_width
+        } else {
+            &self.image_height
+        };
+        let Ok(value) = input.read(cx).value().trim().parse::<f32>() else {
+            self.sync_image_fields(self.image_size(&name, window), window, cx);
+            return;
+        };
+        if !value.is_finite() {
+            self.sync_image_fields(self.image_size(&name, window), window, cx);
+            return;
+        }
+        let mut size = self.image_size(&name, window);
+        let dimension = if width {
+            &mut size.width
+        } else {
+            &mut size.height
+        };
+        let maximum = if width {
+            (f32::from(window.viewport_size().width) - 300.)
+                .max(100.)
+                .min(4096.)
+        } else {
+            4096.
+        };
+        let value = value.clamp(16., maximum);
+        let changed = (*dimension - value).abs() > 0.01;
+        *dimension = value;
+        if changed {
+            self.library.notes[self.library.active]
+                .image_sizes
+                .insert(name, size);
+            self.persist(Vec::new(), cx);
+        }
+        self.sync_image_fields(size, window, cx);
+    }
+    fn resize_image(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = &self.image_resize else {
+            return;
+        };
+        if !event.dragging() {
+            self.finish_image_resize(cx);
+            return;
+        }
+        let dx = f32::from(event.position.x - drag.origin.x);
+        let dy = f32::from(event.position.y - drag.origin.y);
+        let max_width = (f32::from(window.viewport_size().width) - 300.)
+            .max(100.)
+            .min(4096.);
+        let mut size = drag.original;
+        let x_sign = if [0, 6, 7].contains(&drag.handle) {
+            -1.
+        } else {
+            1.
+        };
+        let y_sign = if [0, 1, 2].contains(&drag.handle) {
+            -1.
+        } else {
+            1.
+        };
+        if drag.handle % 2 == 0 {
+            let sx = dx * x_sign / size.width;
+            let sy = dy * y_sign / size.height;
+            let min_scale = (16. / size.width).max(16. / size.height);
+            let max_scale = (max_width / size.width).min(4096. / size.height);
+            let scale = (1. + if sx.abs() > sy.abs() { sx } else { sy })
+                .clamp(min_scale.min(max_scale), max_scale);
+            size.width *= scale;
+            size.height *= scale;
+        } else if drag.handle == 3 || drag.handle == 7 {
+            size.width = (size.width + dx * x_sign).clamp(16., max_width);
+        } else {
+            size.height = (size.height + dy * y_sign).clamp(16., 4096.);
+        }
+        self.library.notes[self.library.active]
+            .image_sizes
+            .insert(drag.name.clone(), size);
+        self.sync_image_fields(size, window, cx);
+        cx.stop_propagation();
+        cx.notify();
+    }
+    fn finish_image_resize(&mut self, cx: &mut Context<Self>) {
+        if self.image_resize.take().is_some() {
+            self.persist(Vec::new(), cx);
+        }
+    }
+    fn image_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .text_size(px(13.))
+            .child(tr("宽"))
+            .child(Input::new(&self.image_width).w(px(76.)).h(px(34.)))
+            .child(tr("高"))
+            .child(Input::new(&self.image_height).w(px(76.)).h(px(34.)))
+            .child("px")
+            .child(
+                Button::new("reset-note-image")
+                    .ghost()
+                    .icon(crate::assets::ActionIcon::Refresh)
+                    .tooltip(tr("恢复原始比例"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some((name, _)) = this.selected_image.clone() {
+                            let natural = this.natural_image_size(&name);
+                            let mut size = this.image_size(&name, window);
+                            size.height = size.width * natural.height / natural.width;
+                            let scale = (4096. / size.height).min(1.);
+                            size.width *= scale;
+                            size.height *= scale;
+                            this.library.notes[this.library.active]
+                                .image_sizes
+                                .insert(name, size);
+                            this.sync_image_fields(size, window, cx);
+                            this.persist(Vec::new(), cx);
+                        }
+                    })),
+            )
+            .into_any_element()
     }
     fn rendered_block(
         &self,
@@ -567,6 +822,11 @@ impl Notes {
                     }),
                 );
             }
+            let size = self.image_size(&name, window);
+            let selected = self
+                .selected_image
+                .as_ref()
+                .is_some_and(|(file, _)| file == &name);
             let image: AnyElement = if let Some((_, bytes)) =
                 self.pending_images.iter().find(|(file, _)| file == &name)
             {
@@ -580,9 +840,9 @@ impl Notes {
                     _ => ImageFormat::Png,
                 };
                 img(Arc::new(Image::from_bytes(format, bytes.clone())))
-                    .max_w_full()
-                    .max_h(px(720.))
-                    .object_fit(ObjectFit::Contain)
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Fill)
                     .into_any_element()
             } else if let Some(path) = self
                 .root
@@ -591,9 +851,9 @@ impl Notes {
                 .filter(|path| path.is_file())
             {
                 img(path)
-                    .max_w_full()
-                    .max_h(px(720.))
-                    .object_fit(ObjectFit::Contain)
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Fill)
                     .into_any_element()
             } else {
                 div()
@@ -603,15 +863,84 @@ impl Notes {
             };
             let image_end = start + range.end;
             let insertion = start + source.len();
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("note-picture-{image_end}")))
-                    .child(image)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.begin_edit(insertion..insertion, window, cx);
-                    })),
-            );
+            let select_name = name.clone();
+            let mut frame = div()
+                .id(SharedString::from(format!("note-picture-{image_end}")))
+                .relative()
+                .flex_shrink_0()
+                .w(px(size.width + 12.))
+                .h(px(size.height + 12.))
+                .p(px(5.))
+                .border_1()
+                .border_color(rgb(if selected {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                }))
+                .cursor(CursorStyle::PointingHand)
+                .child(image)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    // A resize must keep its selection when the mouse is released.
+                    if this
+                        .selected_image
+                        .as_ref()
+                        .is_none_or(|(file, _)| file != &select_name)
+                    {
+                        this.select_image(select_name.clone(), insertion, window, cx);
+                    }
+                }));
+            if selected {
+                let positions = [
+                    (0., 0.),
+                    (0.5, 0.),
+                    (1., 0.),
+                    (1., 0.5),
+                    (1., 1.),
+                    (0.5, 1.),
+                    (0., 1.),
+                    (0., 0.5),
+                ];
+                for (handle, (x, y)) in positions.into_iter().enumerate() {
+                    let drag_name = name.clone();
+                    let cursor = match handle {
+                        0 | 4 => CursorStyle::ResizeUpLeftDownRight,
+                        2 | 6 => CursorStyle::ResizeUpRightDownLeft,
+                        1 | 5 => CursorStyle::ResizeUpDown,
+                        _ => CursorStyle::ResizeLeftRight,
+                    };
+                    frame = frame.child(
+                        div()
+                            .id((
+                                SharedString::from(format!("image-handle-{image_end}")),
+                                handle,
+                            ))
+                            .absolute()
+                            .left(px(x * (size.width + 2.)))
+                            .top(px(y * (size.height + 2.)))
+                            .size(px(10.))
+                            .border_1()
+                            .border_color(rgb(self.colors.accent))
+                            .bg(rgb(self.colors.surface))
+                            .cursor(cursor)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    window.prevent_default();
+                                    this.image_resize = Some(ImageResize {
+                                        name: drag_name.clone(),
+                                        origin: event.position,
+                                        original: size,
+                                        handle,
+                                    });
+                                }),
+                            )
+                            .on_click(|_, _, cx| cx.stop_propagation()),
+                    );
+                }
+            }
+            block = block.child(frame);
             offset = range.end;
         }
         if offset < source.len() {
@@ -925,7 +1254,11 @@ impl Notes {
             return false;
         }
         if self.editing.is_none() {
-            let end = self.library.notes[self.library.active].body.len();
+            let end = self
+                .selected_image
+                .as_ref()
+                .map(|(_, position)| *position)
+                .unwrap_or(self.library.notes[self.library.active].body.len());
             self.begin_edit(end..end, window, cx);
         }
         let markdown = images
@@ -1014,6 +1347,8 @@ impl Render for Notes {
         // Theme colors are supplied through the same palette as the workbench.
         let mut tabs = div()
             .id("note-tabs")
+            .flex_1()
+            .min_w_0()
             .flex()
             .gap_2()
             .overflow_x_scroll()
@@ -1100,6 +1435,21 @@ impl Render for Notes {
             .pb_0()
             .gap_4()
             .bg(rgb(colors.bg))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.resize_image(event, window, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_image_resize(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_image_resize(cx);
+                }),
+            )
             .capture_action(
                 cx.listener(|this, _: &crate::ui::CloseOverlay, window, cx| {
                     if this.title_edit.is_some() || this.delete_note.is_some() {
@@ -1139,7 +1489,17 @@ impl Render for Notes {
                             .child(self.status.clone()),
                     ),
             )
-            .child(tabs)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .child(tabs)
+                    .when(self.selected_image.is_some(), |row| {
+                        row.child(self.image_controls(cx))
+                    }),
+            )
             .when(self.font_settings_open, |s| {
                 s.child(
                     div()
