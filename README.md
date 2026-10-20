@@ -28,7 +28,7 @@ Enable **Keep running in the system tray on close** in **Settings → General** 
 
 Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Runtime**, started only for capture and closed afterward. An on-demand Node.js worker manages projects and development servers. Choose your data folder on first launch; it can be changed later in Settings. Project data and runtime preview caches stay local; only the selected documentation images are published.
 
-Notes are available from the sidebar, with tabs, automatic saving, and clipboard image paste (Ctrl+V). Change the notes folder in **Settings → Notes**; existing notes and images are moved to the new folder after verification. Notes stay local.
+Notes are available from the sidebar, with tabs, automatic saving, Markdown editing and live split preview. Pasted images (Ctrl+V) are inserted at the cursor as local Markdown image links. Change the notes folder in **Settings → Notes**; existing notes and images are moved to the new folder after verification. Notes stay local.
 
 ## Download
 

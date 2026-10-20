@@ -282,5 +282,8 @@
   "字号": "Font size",
   "缩小字号": "Decrease font size",
   "放大字号": "Increase font size",
-  "恢复默认": "Reset to default"
+  "恢复默认": "Reset to default",
+  "Markdown 编辑": "Edit Markdown",
+  "双栏实时预览": "Live split preview",
+  "Markdown 预览": "Markdown preview"
 }
