@@ -3,6 +3,7 @@ mod assets;
 mod backend;
 mod dev_servers;
 mod i18n;
+mod notes;
 mod preview_cache;
 #[cfg(windows)]
 mod single_instance;
@@ -51,6 +52,7 @@ fn main() {
             cx.on_app_quit(move |_cx| {
                 #[cfg(windows)]
                 tray::shutdown(_cx);
+                crate::notes::flush(_cx);
                 cleanup.shutdown();
                 async {}
             })

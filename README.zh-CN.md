@@ -28,6 +28,8 @@ Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、
 
 界面使用 **Rust + GPUI**。预览截图调用系统 **Microsoft Edge WebView2 Runtime**，仅在获取画面时启动，完成后关闭。项目和开发服务由按需启动的 Node.js 后台管理。首次打开必须选择数据目录，之后可在设置中更换。项目数据和运行时预览缓存保留在本机；仓库仅收录选定的文档展示图。
 
+侧栏提供笔记入口，支持多标签、新建笔记、修改自动保存和 Ctrl+V 粘贴图片。在**设置 → 笔记**中更换保存目录，已有笔记及图片会迁移到新目录，核对成功后删除旧文件。笔记仅保存在本机。
+
 ## 下载
 
 从 [Releases](https://github.com/bucool/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面默认跟随 Windows 显示语言：中文系统使用简体中文，其他语言使用 English。可在**设置 → 常规 → 界面语言**中选择**跟随系统、简体中文、English**，点击即时预览，保存后记住选择。

@@ -28,6 +28,8 @@ Enable **Keep running in the system tray on close** in **Settings → General** 
 
 Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Runtime**, started only for capture and closed afterward. An on-demand Node.js worker manages projects and development servers. Choose your data folder on first launch; it can be changed later in Settings. Project data and runtime preview caches stay local; only the selected documentation images are published.
 
+Notes are available from the sidebar, with tabs, automatic saving, and clipboard image paste (Ctrl+V). Change the notes folder in **Settings → Notes**; existing notes and images are moved to the new folder after verification. Notes stay local.
+
 ## Download
 
 Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface defaults to your Windows display language: Simplified Chinese for Chinese systems, English otherwise. Choose **Follow system**, **简体中文**, or **English** in **Settings → General → Interface language**. Changes preview immediately; save to keep your choice.

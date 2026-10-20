@@ -29,3 +29,9 @@ screenshots/
 /dist/
 /.local/
 webview2/
+
+# Private local notes and pasted images.
+notes/
+notes.json
+notes-location.json
+notes-images/

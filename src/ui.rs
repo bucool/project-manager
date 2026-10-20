@@ -29,11 +29,13 @@ enum View {
     All,
     Favorites,
     Running,
+    Notes,
     Directory(String),
 }
 impl View {
     fn includes(&self, project: &Project) -> bool {
         match self {
+            Self::Notes => false,
             Self::All => true,
             Self::Favorites => project.favorite,
             Self::Running => project.status == "running",
@@ -43,6 +45,7 @@ impl View {
 
     fn label(&self) -> String {
         match self {
+            Self::Notes => tr("笔记").into(),
             Self::All => tr("项目库").into(),
             Self::Favorites => tr("我的收藏").into(),
             Self::Running => tr("正在运行").into(),
@@ -64,6 +67,7 @@ enum SettingsSection {
     Appearance,
     Directories,
     Preview,
+    Notes,
     Storage,
 }
 
@@ -74,6 +78,7 @@ impl SettingsSection {
             Self::Appearance => tr("外观主题"),
             Self::Directories => tr("项目目录"),
             Self::Preview => tr("扫描与预览"),
+            Self::Notes => tr("笔记"),
             Self::Storage => tr("数据存储"),
         }
     }
@@ -84,6 +89,7 @@ impl SettingsSection {
             Self::Appearance => IconName::Palette,
             Self::Directories => IconName::Folder,
             Self::Preview => IconName::Settings2,
+            Self::Notes => IconName::Folder,
             Self::Storage => IconName::Folder,
         }
     }
@@ -135,6 +141,7 @@ impl SortOrder {
 }
 
 pub struct Workbench {
+    notes: Entity<crate::notes::Notes>,
     backend: Backend,
     monitor: Monitor,
     discovery: Discovery,
@@ -526,9 +533,12 @@ impl Workbench {
             }
         })
         .detach();
+        let notes = cx.new(|cx| crate::notes::Notes::new(window, cx));
+        let notes_subscription = cx.observe(&notes, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus);
         Self {
+            notes,
             backend,
             monitor,
             discovery: Discovery::default(),
@@ -572,7 +582,7 @@ impl Workbench {
             error: false,
             show_logs: false,
             focus,
-            _subscriptions: vec![subscription, storage_subscription],
+            _subscriptions: vec![notes_subscription, subscription, storage_subscription],
         }
     }
     fn receive(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -956,6 +966,7 @@ impl Workbench {
                     (View::All, tr("全部项目"), IconName::LayoutDashboard, count),
                     (View::Favorites, tr("我的收藏"), IconName::Star, favorite),
                     (View::Running, tr("正在运行"), IconName::ExternalLink, running),
+                    (View::Notes, tr("笔记"), IconName::Folder, self.notes.read(cx).count()),
                 ]
                 .into_iter()
                 .enumerate()
@@ -2067,6 +2078,11 @@ impl Workbench {
     }
 
     fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.view == View::Notes {
+            let colors = self.colors();
+            self.notes.update(cx, |notes, _| notes.colors = colors);
+            return self.notes.clone().into_any_element();
+        }
         if self.view == View::Running {
             return self.running_content(window, cx);
         }
@@ -3107,6 +3123,7 @@ impl Workbench {
             SettingsSection::Appearance => tr("点击主题即时预览，保存后保留选择。"),
             SettingsSection::Directories => tr("管理项目来源文件夹。"),
             SettingsSection::Preview => tr("设置项目识别和画面获取方式。"),
+            SettingsSection::Notes => tr("设置笔记和图片的保存位置，更换目录后立即生效。"),
             SettingsSection::Storage => tr("设置配置、项目列表与预览的保存位置。"),
         };
         let content = match self.settings_section {
@@ -3114,6 +3131,7 @@ impl Workbench {
             SettingsSection::Appearance => self.theme_picker(content_width, cx).into_any_element(),
             SettingsSection::Directories => self.settings_directories(cx).into_any_element(),
             SettingsSection::Preview => self.settings_preview(cx).into_any_element(),
+            SettingsSection::Notes => crate::notes::settings(self.notes.clone(), cx),
             SettingsSection::Storage => self.storage_form(cx).into_any_element(),
         };
         let panel = div()
@@ -3177,6 +3195,7 @@ impl Workbench {
                                     SettingsSection::Appearance,
                                     SettingsSection::Directories,
                                     SettingsSection::Preview,
+                                    SettingsSection::Notes,
                                     SettingsSection::Storage,
                                 ]
                                 .into_iter()
@@ -3543,6 +3562,8 @@ impl Workbench {
 }
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.notes
+            .update(cx, |notes, cx| notes.initialize(window, cx));
         let english = i18n::english();
         if self.localized_english != english {
             self.search.update(cx, |input, cx| {
