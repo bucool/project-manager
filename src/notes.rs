@@ -24,10 +24,24 @@ struct Note {
     #[serde(default)]
     images: Vec<String>,
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Library {
     notes: Vec<Note>,
     active: usize,
+    #[serde(default = "default_font_size")]
+    font_size: u16,
+}
+fn default_font_size() -> u16 {
+    16
+}
+impl Default for Library {
+    fn default() -> Self {
+        Self {
+            notes: Vec::new(),
+            active: 0,
+            font_size: default_font_size(),
+        }
+    }
 }
 enum Command {
     Save(u64, Library, Vec<(String, Vec<u8>)>),
@@ -174,6 +188,7 @@ pub struct Notes {
     library: Library,
     title_edit: Option<Option<String>>,
     dialog_focus: FocusHandle,
+    font_settings_open: bool,
     delete_note: Option<String>,
     title: Entity<InputState>,
     body: Entity<InputState>,
@@ -205,6 +220,7 @@ impl Notes {
             library: Library::default(),
             title_edit: None,
             dialog_focus: cx.focus_handle(),
+            font_settings_open: false,
             delete_note: None,
             title,
             body,
@@ -248,6 +264,7 @@ impl Notes {
         match result {
             Ok(Some((root, mut library))) => {
                 library.active = library.active.min(library.notes.len().saturating_sub(1));
+                library.font_size = library.font_size.clamp(10, 36);
                 self.library = library;
                 self.root = Some(root.clone());
                 self.loaded = true;
@@ -337,6 +354,10 @@ impl Notes {
             }
         }
         cx.notify();
+    }
+    fn set_font_size(&mut self, size: u16, cx: &mut Context<Self>) {
+        self.library.font_size = size.clamp(10, 36);
+        self.persist(Vec::new(), cx);
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         if let Some(note) = self.library.notes.get_mut(self.library.active) {
@@ -695,6 +716,24 @@ impl Render for Notes {
                         })),
                 );
         }
+        tabs = tabs.child(
+            Button::new("note-font-settings")
+                .ghost()
+                .icon(IconName::Settings2)
+                .tooltip(tr("字号设置"))
+                .w(px(40.))
+                .h(px(40.))
+                .when(self.font_settings_open, |s| s.bg(rgb(colors.selected)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.font_settings_open = !this.font_settings_open;
+                    cx.notify();
+                })),
+        );
+        let has_images = self
+            .library
+            .notes
+            .get(self.library.active)
+            .is_some_and(|note| !note.images.is_empty());
         let mut images = div()
             .id("note-images")
             .flex()
@@ -740,6 +779,7 @@ impl Render for Notes {
             .flex()
             .flex_col()
             .p_6()
+            .pb_0()
             .gap_4()
             .bg(rgb(colors.bg))
             .capture_action(
@@ -782,6 +822,46 @@ impl Render for Notes {
                     ),
             )
             .child(tabs)
+            .when(self.font_settings_open, |s| {
+                s.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .flex_shrink_0()
+                        .child(tr("字号"))
+                        .child(
+                            Button::new("note-font-smaller")
+                                .ghost()
+                                .icon(IconName::Minus)
+                                .tooltip(tr("缩小字号"))
+                                .disabled(self.sender.is_none() || self.library.font_size <= 10)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_font_size(this.library.font_size.saturating_sub(1), cx)
+                                })),
+                        )
+                        .child(format!("{} px", self.library.font_size))
+                        .child(
+                            Button::new("note-font-larger")
+                                .ghost()
+                                .icon(IconName::Plus)
+                                .tooltip(tr("放大字号"))
+                                .disabled(self.sender.is_none() || self.library.font_size >= 36)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_font_size(this.library.font_size + 1, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("note-font-reset")
+                                .ghost()
+                                .label(tr("恢复默认"))
+                                .disabled(self.sender.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_font_size(default_font_size(), cx)
+                                })),
+                        ),
+                )
+            })
             .when(!self.library.notes.is_empty(), |s| {
                 s.child(
                     div().flex_1().min_h_0().child(
@@ -789,10 +869,12 @@ impl Render for Notes {
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)
+                            .text_size(px(self.library.font_size as f32))
+                            .pb_0()
                             .h_full(),
                     ),
                 )
-                .child(images)
+                .when(has_images, |s| s.child(images))
             })
             .when(self.library.notes.is_empty(), |s| {
                 s.child(

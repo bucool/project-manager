@@ -277,5 +277,10 @@
   "修改笔记名称": "Rename note",
   "确定删除这条笔记吗？此操作无法撤销。": "Delete this note? This action cannot be undone.",
   "确认删除": "Confirm delete",
-  "保存": "Save"
+  "保存": "Save",
+  "字号设置": "Font size settings",
+  "字号": "Font size",
+  "缩小字号": "Decrease font size",
+  "放大字号": "Increase font size",
+  "恢复默认": "Reset to default"
 }
