@@ -1179,7 +1179,6 @@ impl Notes {
         let mut block = div()
             .flex()
             .flex_col()
-            .gap_2()
             .text_size(px(self.library.font_size as f32));
         let mut offset = 0;
         for (range, name) in local_images(source) {
@@ -1191,8 +1190,19 @@ impl Notes {
                 continue;
             }
             if range.start > offset {
-                block =
-                    block.child(self.render_text(&source[offset..range.start], start + offset, cx));
+                let between = &source[offset..range.start];
+                if between.trim().is_empty() {
+                    // A Markdown line separator is not an empty text paragraph.
+                    block = block.child(self.blank_lines(
+                        &self.library.notes[self.library.active].body,
+                        start + offset..start + range.start,
+                        offset > 0,
+                        false,
+                        cx,
+                    ));
+                } else {
+                    block = block.child(self.render_text(between, start + offset, cx));
+                }
             }
             let size = self.image_size(&name, window);
             let selected = self
@@ -1334,7 +1344,17 @@ impl Notes {
             offset = range.end;
         }
         if offset < source.len() {
-            block = block.child(self.render_text(&source[offset..], start + offset, cx));
+            if source[offset..].trim().is_empty() {
+                block = block.child(self.blank_lines(
+                    &self.library.notes[self.library.active].body,
+                    start + offset..start + source.len(),
+                    offset > 0,
+                    false,
+                    cx,
+                ));
+            } else {
+                block = block.child(self.render_text(&source[offset..], start + offset, cx));
+            }
         }
         block.into_any_element()
     }
@@ -1780,9 +1800,43 @@ impl Notes {
             .iter()
             .map(|(name, _)| format!("![image](notes-images/{name})"))
             .collect::<Vec<_>>()
-            .join("\n\n");
+            .join("\n");
+        self.changed(cx);
+        let (selection_start, selection_end) = self.body.update(cx, |input, cx| {
+            let value = input.value();
+            let to_byte = |offset: usize| {
+                let mut units = 0;
+                for (index, ch) in value.char_indices() {
+                    if units >= offset {
+                        return index;
+                    }
+                    units += ch.len_utf16();
+                }
+                value.len()
+            };
+            input
+                .selected_text_range(false, window, cx)
+                .map(|selection| (to_byte(selection.range.start), to_byte(selection.range.end)))
+                .unwrap_or((input.cursor(), input.cursor()))
+        });
+        let block_start = self.editing.as_ref().map(|range| range.start).unwrap_or(0);
+        let note = &self.library.notes[self.library.active];
+        let before = &note.body[..block_start + selection_start];
+        let after = &note.body[block_start + selection_end..];
+        // Add only a line separator when needed; never manufacture blank paragraphs.
+        let prefix = if before.is_empty() || before.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let suffix = if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") {
+            ""
+        } else {
+            "\n"
+        };
+        let insertion = format!("{prefix}{markdown}{suffix}");
         self.body.update(cx, |input, cx| {
-            input.replace(format!("\n\n{markdown}\n\n"), window, cx);
+            input.replace(insertion, window, cx);
             cx.notify();
         });
         self.changed(cx);
