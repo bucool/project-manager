@@ -89,7 +89,6 @@ impl gpui::http_client::HttpClient for NoteImageClient {
 #[derive(Clone, Copy, PartialEq)]
 enum MarkdownMode {
     Edit,
-    Split,
     Preview,
 }
 
@@ -303,7 +302,7 @@ impl Notes {
             title_edit: None,
             dialog_focus: cx.focus_handle(),
             font_settings_open: false,
-            markdown_mode: MarkdownMode::Split,
+            markdown_mode: MarkdownMode::Edit,
             image_store: Arc::new(RwLock::new(NoteImages::default())),
             delete_note: None,
             title,
@@ -864,7 +863,6 @@ impl Render for Notes {
                 IconName::SquareTerminal,
                 tr("Markdown 编辑"),
             ),
-            (MarkdownMode::Split, IconName::PanelLeft, tr("双栏实时预览")),
             (MarkdownMode::Preview, IconName::Eye, tr("Markdown 预览")),
         ]
         .into_iter()
