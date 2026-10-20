@@ -814,7 +814,7 @@ impl Notes {
             .child(
                 self.editor
                     .scroll
-                    .layer_with_line_height(self.document_scroll.clone(), px(112.)),
+                    .layer_with_line_height(self.document_scroll.clone(), px(80.)),
             )
             .child(gpui_component::scroll::Scrollbar::vertical(
                 &self.editor.scroll.handle(&self.document_scroll),
