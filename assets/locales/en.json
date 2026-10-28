@@ -243,7 +243,6 @@
   "正在安装项目依赖，请完成后再扫描或修改目录。": "Wait for dependency installation to finish before scanning or changing folders.",
   "正在安装依赖，请稍候。": "Installing dependencies. Please wait.",
   "项目尚未安装依赖，请先点击“安装依赖”。": "Click Install dependencies before starting this project.",
-  "最多同时运行 4 个项目，请先停止一个项目。": "Up to 4 projects can run at once. Stop a project first.",
   "启动已取消": "Startup canceled",
   "60 秒内未能启动，请查看运行日志。": "The project did not start within 60 seconds. Check the logs.",
   "关闭项目服务失败": "Could not stop the project service",

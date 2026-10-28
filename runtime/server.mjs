@@ -233,7 +233,6 @@ async function startProject(project, owner = 'user') {
   }
   if (installJobs.has(project.id)) throw new Error('正在安装依赖，请稍候。');
   if (!project.dependenciesInstalled || dependencyState.get(project.id)?.state === 'error') throw new Error('项目尚未安装依赖，请先点击“安装依赖”。');
-  if ([...sessions.values()].filter(s => ['starting', 'running'].includes(s.status)).length >= 4) throw new Error('最多同时运行 4 个项目，请先停止一个项目。');
   session = { status: 'starting', logs: '', url: null, error: null, child: null, owner };
   sessions.set(project.id, session);
   session.ready = (async () => {
