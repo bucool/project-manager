@@ -1371,7 +1371,7 @@ impl Render for Notes {
                     })),
             );
         }
-        tabs = tabs.child(
+        let mut toolbar = div().flex().items_center().flex_shrink_0().gap_2().child(
             Button::new("new-note")
                 .icon(IconName::Plus)
                 .tooltip(tr("新建笔记"))
@@ -1381,7 +1381,7 @@ impl Render for Notes {
                 .on_click(cx.listener(|this, _, window, cx| this.edit_title(true, window, cx))),
         );
         if !self.library.notes.is_empty() {
-            tabs = tabs
+            toolbar = toolbar
                 .child(
                     Button::new("rename-note")
                         .ghost()
@@ -1413,7 +1413,7 @@ impl Render for Notes {
                         })),
                 );
         }
-        tabs = tabs.child(
+        toolbar = toolbar.child(
             Button::new("note-font-settings")
                 .ghost()
                 .icon(IconName::Settings2)
@@ -1469,11 +1469,19 @@ impl Render for Notes {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .flex_shrink_0()
                     .child(
                         div()
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tr("笔记")),
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .text_size(px(24.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(tr("笔记")),
+                            )
+                            .child(toolbar),
                     )
                     .child(
                         div()

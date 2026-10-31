@@ -29,9 +29,12 @@ impl Global for Tray {}
 
 pub fn init(window: &Window, cx: &mut App) {
     let (events, receiver) = async_channel::unbounded();
-    // Keep a hidden native window available for secondary launches to identify
-    // this process. A tray icon is still added only when the user hides the app.
+    // Keep the icon visible throughout the application lifetime. The hidden
+    // native window also lets secondary launches identify this process.
     let native = NativeTray::new(events.clone()).ok();
+    if let Some(native) = &native {
+        let _ = native.state.add();
+    }
     cx.set_global(Tray { events, native });
     let handle = window.window_handle();
     cx.spawn(async move |cx| {
@@ -55,7 +58,7 @@ pub fn init(window: &Window, cx: &mut App) {
     .detach();
 }
 
-pub fn show(window: &mut Window, cx: &mut App) {
+pub fn show(window: &mut Window, _cx: &mut App) {
     if let Ok(hwnd) = window_handle(window) {
         unsafe {
             // SW_SHOW preserves a maximized window; only restore minimized ones.
@@ -66,9 +69,6 @@ pub fn show(window: &mut Window, cx: &mut App) {
             };
             let _ = ShowWindow(hwnd, mode);
             let _ = SetForegroundWindow(hwnd);
-        }
-        if let Some(native) = &cx.global::<Tray>().native {
-            native.state.remove();
         }
         window.refresh();
     }
@@ -93,7 +93,6 @@ pub fn hide(window: &Window, cx: &mut App) -> Result<()> {
     // Never hide the only window unless the user can recover it from a tray icon.
     native.state.add()?;
     if !unsafe { ShowWindowAsync(hwnd, SW_HIDE) }.as_bool() {
-        native.state.remove();
         bail!("无法隐藏窗口到系统托盘");
     }
     Ok(())
