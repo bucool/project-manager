@@ -1,5 +1,5 @@
 //! Markdown text with source positions shared by the entire notes document.
-use super::Notes;
+use super::{Notes, formatting};
 use gpui::{prelude::*, *};
 use markdown::mdast::Node;
 use std::ops::Range;
@@ -244,6 +244,25 @@ pub(super) struct FragmentLayout {
 }
 
 impl FragmentLayout {
+    pub fn format_counts(
+        &self,
+        selection: &Range<usize>,
+        spans: &[formatting::FormatSpan],
+        change: formatting::StyleChange,
+    ) -> (usize, usize) {
+        self.content
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                !glyph.source.is_empty()
+                    && glyph.source.end > selection.start
+                    && glyph.source.start < selection.end
+            })
+            .fold((0, 0), |(count, active), glyph| {
+                let style = formatting::format_at(spans, glyph.source.start).render(glyph.style);
+                (count + 1, active + usize::from(change.matches(style)))
+            })
+    }
     pub fn deletion_range(&self, source: usize, backward: bool) -> Option<Range<usize>> {
         if source < self.content.range.start
             || source > self.content.range.end
@@ -392,8 +411,14 @@ impl Element for SelectableText {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+        let notes = self.notes.read(cx);
+        let spans = notes
+            .library
+            .notes
+            .get(notes.library.active)
+            .map_or(&[][..], |note| note.formats.as_slice());
         for glyph in &self.content.glyphs {
-            let mut style = glyph.style;
+            let mut style = formatting::format_at(spans, glyph.source.start).render(glyph.style);
             if self
                 .notes
                 .read(cx)
@@ -413,7 +438,12 @@ impl Element for SelectableText {
                 glyph.source.end > selection.start && glyph.source.start < selection.end
                     || glyph.source.is_empty() && selection.contains(&glyph.source.start)
             }) {
-                style.background_color = Some(rgba(0x6b9edc60).into());
+                let selection: Hsla = rgba(0x6b9edc60).into();
+                style.background_color = Some(
+                    style
+                        .background_color
+                        .map_or(selection, |color| color.blend(selection)),
+                );
             }
             if let Some((range, previous_style)) = highlights.last_mut() {
                 if *previous_style == style && range.end == glyph.display.start {

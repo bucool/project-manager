@@ -2,6 +2,7 @@
 //! Rendered Markdown blocks are layout only; they never own editable text.
 use super::*;
 use crate::smooth_scroll::SmoothScroll;
+use gpui_component::menu::ContextMenuExt;
 use std::{ops::Range, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 actions!(
@@ -13,6 +14,7 @@ actions!(
 struct Revision {
     body: String,
     sizes: HashMap<String, ImageSize>,
+    formats: Vec<formatting::FormatSpan>,
     selection: (usize, usize),
 }
 #[derive(Default)]
@@ -128,6 +130,7 @@ impl Notes {
         Revision {
             body: note.body.clone(),
             sizes: note.image_sizes.clone(),
+            formats: note.formats.clone(),
             selection: self.text_selection.unwrap_or((0, 0)),
         }
     }
@@ -216,9 +219,7 @@ impl Notes {
         };
         self.checkpoint(typing);
         let value = value.replace("\r\n", "\n").replace('\r', "\n");
-        self.library.notes[self.library.active]
-            .body
-            .replace_range(range.clone(), &value);
+        self.replace_source(range.clone(), &value);
         let caret = range.start + value.len();
         self.text_selection = Some((caret, caret));
         self.editor.marked = None;
@@ -256,6 +257,7 @@ impl Notes {
             let note = &mut self.library.notes[self.library.active];
             note.body = previous.body;
             note.image_sizes = previous.sizes;
+            note.formats = previous.formats;
             self.text_selection = Some(previous.selection);
             self.editor.marked = None;
             self.editor_changed(false, cx);
@@ -725,6 +727,7 @@ impl Notes {
                 ),
         );
         let owner = cx.entity();
+        let menu_owner = owner.downgrade();
         div()
             .relative()
             .flex_1()
@@ -819,6 +822,17 @@ impl Notes {
             .child(gpui_component::scroll::Scrollbar::vertical(
                 &self.editor.scroll.handle(&self.document_scroll),
             ))
+            .context_menu(move |menu, window, cx| {
+                let Some(owner) = menu_owner.upgrade() else {
+                    return menu;
+                };
+                let selection = owner.read(cx).format_menu();
+                if let Some(selection) = selection {
+                    selection.build(menu, window, cx, menu_owner.clone())
+                } else {
+                    menu
+                }
+            })
             .into_any_element()
     }
     pub(super) fn editor_blank(&self, offset: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -968,9 +982,7 @@ impl EntityInputHandler for Notes {
             .unwrap_or_else(|| self.selection());
         if self.editor.marked.take().is_some() {
             let start = range.start;
-            self.library.notes[self.library.active]
-                .body
-                .replace_range(range, value);
+            self.replace_source(range, value);
             let caret = start + value.len();
             self.text_selection = Some((caret, caret));
             self.editor_changed(false, cx);
@@ -1001,9 +1013,7 @@ impl EntityInputHandler for Notes {
             }
             self.checkpoint(false);
         }
-        self.library.notes[self.library.active]
-            .body
-            .replace_range(range, value);
+        self.replace_source(range, value);
         self.editor.marked = Some(start..start + value.len());
         let selection =
             selection.unwrap_or(value.encode_utf16().count()..value.encode_utf16().count());

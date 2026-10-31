@@ -9,6 +9,8 @@ use gpui_component::{
 };
 #[path = "notes_editor.rs"]
 mod editor;
+#[path = "notes_format.rs"]
+mod formatting;
 #[path = "notes_image.rs"]
 mod picture;
 #[path = "notes_text.rs"]
@@ -85,6 +87,8 @@ struct Note {
     id: String,
     title: String,
     body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    formats: Vec<formatting::FormatSpan>,
     #[serde(default)]
     images: Vec<String>,
     #[serde(default)]
@@ -109,6 +113,10 @@ struct Library {
     font_size: u16,
     #[serde(default)]
     inline_images: bool,
+    #[serde(default = "formatting::default_text_color")]
+    last_text_color: u32,
+    #[serde(default = "formatting::default_background_color")]
+    last_background_color: u32,
 }
 fn default_font_size() -> u16 {
     16
@@ -120,6 +128,8 @@ impl Default for Library {
             active: 0,
             font_size: default_font_size(),
             inline_images: true,
+            last_text_color: formatting::default_text_color(),
+            last_background_color: formatting::default_background_color(),
         }
     }
 }
@@ -410,6 +420,13 @@ impl Notes {
                         }
                     }
                     library.inline_images = true;
+                }
+                for note in &mut library.notes {
+                    note.formats.retain(|span| {
+                        span.range.start < span.range.end
+                            && note.body.get(span.range.clone()).is_some()
+                    });
+                    note.formats.sort_by_key(|span| span.range.start);
                 }
                 library.font_size = library.font_size.clamp(10, 36);
                 self.library = library;

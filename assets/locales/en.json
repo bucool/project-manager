@@ -285,5 +285,22 @@
   "图片文件不存在": "Image file not found",
   "宽": "Width",
   "高": "Height",
-  "恢复原始比例": "Restore original aspect ratio"
+  "恢复原始比例": "Restore original aspect ratio",
+  "加粗": "Bold",
+  "高亮": "Highlight",
+  "删除线": "Strikethrough",
+  "下划线": "Underline",
+  "文字颜色": "Text color",
+  "高亮背景": "Highlight background",
+  "上次使用的颜色": "Last used color",
+  "无背景颜色": "No background color",
+  "默认文字颜色": "Default text color",
+  "灰色": "Gray",
+  "红色": "Red",
+  "橙色": "Orange",
+  "黄色": "Yellow",
+  "绿色": "Green",
+  "蓝色": "Blue",
+  "紫色": "Purple",
+  "粉色": "Pink"
 }
