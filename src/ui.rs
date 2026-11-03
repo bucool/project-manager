@@ -1188,6 +1188,7 @@ impl Workbench {
         let p_refresh = p.clone();
         let error_project_id = p.id.clone();
         let path = p.path.clone();
+        let copy_path = path.clone();
         let (status, status_color, failed) = if installing {
             (tr("正在安装依赖"), 0x326da8, false)
         } else if p.status == "stopping" {
@@ -1233,6 +1234,19 @@ impl Workbench {
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis(),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("copy-path-{}", p.id)))
+                            .icon(icon(IconName::Copy, 18.))
+                            .ghost()
+                            .size(px(36.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(rgb(colors.line))
+                            .tooltip(format!("{}\n{}", tr("复制项目文件夹路径"), copy_path))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                            }),
                     )
                     .child(
                         Button::new(SharedString::from(format!("fav-{}", p.id)))
@@ -1315,6 +1329,17 @@ impl Workbench {
                             .flex_shrink_0()
                             .child(div().size(px(6.)).rounded_full().bg(rgb(status_color)))
                             .child(text(status, 12., status_color).font_weight(FontWeight::MEDIUM))
+                            .when_some(p.lan_urls.first().filter(|_| running), |s, address| {
+                                s.child(text(
+                                    address
+                                        .trim_start_matches("http://")
+                                        .trim_start_matches("https://")
+                                        .trim_end_matches('/')
+                                        .to_owned(),
+                                    12.,
+                                    status_color,
+                                ))
+                            })
                             .when(failed, |s| {
                                 s.child(
                                     Button::new(SharedString::from(format!("error-{}", p.id)))
@@ -1394,16 +1419,6 @@ impl Workbench {
                                         })),
                                 )
                             })
-                            .when_some(
-                                p.lan_urls.first().cloned().filter(|_| running),
-                                |s, address| {
-                                    s.child(self.lan_copy_button(
-                                        SharedString::from(format!("lan-{}", p.id)),
-                                        address,
-                                        cx,
-                                    ))
-                                },
-                            )
                             .child(
                                 Button::new(SharedString::from(format!("play-{}", p.id)))
                                     .icon(if installing {
