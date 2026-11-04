@@ -8,6 +8,7 @@ mod preview_cache;
 #[cfg(windows)]
 mod single_instance;
 mod smooth_scroll;
+mod startup;
 mod storage;
 mod theme;
 #[cfg(windows)]

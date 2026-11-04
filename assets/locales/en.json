@@ -303,5 +303,10 @@
   "蓝色": "Blue",
   "紫色": "Purple",
   "粉色": "Pink",
-  "复制项目文件夹路径": "Copy project folder path"
+  "复制项目文件夹路径": "Copy project folder path",
+  "开机自启": "Launch at startup",
+  "登录 Windows 时自动启动 Project Manager，保存设置后生效。": "Start Project Manager when you sign in to Windows. Applies after saving settings.",
+  "无法读取开机自启设置": "Could not read startup settings",
+  "无法保存开机自启设置": "Could not save startup settings",
+  "设置界面语言、开机自启和窗口关闭行为。": "Configure the interface language, login startup, and window close behavior."
 }

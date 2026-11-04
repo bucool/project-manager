@@ -175,6 +175,9 @@ pub struct Workbench {
     auto_capture: bool,
     game_engines_only: bool,
     close_to_tray: bool,
+    start_on_login: bool,
+    start_on_login_dirty: bool,
+    startup_error: String,
     draft_language: Language,
     localized_english: bool,
     draft_theme: String,
@@ -572,6 +575,9 @@ impl Workbench {
             auto_capture: true,
             game_engines_only: false,
             close_to_tray: false,
+            start_on_login: false,
+            start_on_login_dirty: false,
+            startup_error: String::new(),
             draft_language: i18n::language(),
             localized_english: i18n::english(),
             draft_theme: "default".into(),
@@ -888,6 +894,15 @@ impl Workbench {
         self.auto_capture = self.snapshot.settings.auto_capture;
         self.game_engines_only = self.snapshot.settings.game_engines_only;
         self.close_to_tray = self.snapshot.settings.close_to_tray;
+        self.start_on_login_dirty = false;
+        self.startup_error.clear();
+        self.start_on_login = match crate::startup::enabled() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                self.startup_error = format!("{}: {error:#}", tr("无法读取开机自启设置"));
+                false
+            }
+        };
         self.draft_language = self.snapshot.settings.language;
         self.draft_theme = theme::find(&self.snapshot.settings.theme).id.into();
         self.selected = None;
@@ -2892,6 +2907,23 @@ impl Workbench {
                 |this, value| this.close_to_tray = value,
                 cx,
             ))
+            .when(cfg!(windows), |s| {
+                s.child(self.settings_option(
+                    "start-on-login",
+                    tr("开机自启"),
+                    tr("登录 Windows 时自动启动 Project Manager，保存设置后生效。"),
+                    self.start_on_login,
+                    |this, value| {
+                        this.start_on_login = value;
+                        this.start_on_login_dirty = true;
+                        this.startup_error.clear();
+                    },
+                    cx,
+                ))
+            })
+            .when(!self.startup_error.is_empty(), |s| {
+                s.child(text(self.startup_error.clone(), 12., 0xbf4b45))
+            })
     }
 
     fn settings_preview(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3093,6 +3125,16 @@ impl Workbench {
     }
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
+        if self.start_on_login_dirty {
+            if let Err(error) = crate::startup::set_enabled(self.start_on_login) {
+                self.startup_error = format!("{}: {error:#}", tr("无法保存开机自启设置"));
+                self.settings_section = SettingsSection::General;
+                cx.notify();
+                return;
+            }
+            self.start_on_login_dirty = false;
+            self.startup_error.clear();
+        }
         self.add_root(self.directory.read(cx).value().to_string());
         let roots_changed = self
             .draft_roots
@@ -3134,7 +3176,7 @@ impl Workbench {
         let navigation_width = if i18n::english() { 204. } else { 184. };
         let content_width = width - navigation_width - 2. - 64.;
         let description = match self.settings_section {
-            SettingsSection::General => tr("设置界面语言和窗口关闭行为。"),
+            SettingsSection::General => tr("设置界面语言、开机自启和窗口关闭行为。"),
             SettingsSection::Appearance => tr("点击主题即时预览，保存后保留选择。"),
             SettingsSection::Directories => tr("管理项目来源文件夹。"),
             SettingsSection::Preview => tr("设置项目识别和画面获取方式。"),
