@@ -5,6 +5,7 @@ mod dev_servers;
 mod i18n;
 mod notes;
 mod preview_cache;
+mod project_git;
 #[cfg(windows)]
 mod single_instance;
 mod smooth_scroll;

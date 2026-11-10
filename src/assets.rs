@@ -6,6 +6,7 @@ const PLAY: &str = "project-manager/icons/play.svg";
 const REFRESH: &str = "project-manager/icons/refresh.svg";
 const EDIT: &str = "project-manager/icons/edit.svg";
 const TRASH: &str = "project-manager/icons/trash.svg";
+const GIT: &str = "project-manager/icons/git-commit.svg";
 const CHECK: &str = "icons/check.svg";
 pub const APP_ICON: &str = "project-manager/app-icon.png";
 
@@ -29,6 +30,9 @@ impl AssetSource for Assets {
             TRASH => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/trash.svg"
             )))),
+            GIT => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/git-commit.svg"
+            )))),
             _ => gpui_component_assets::Assets.load(path),
         }
     }
@@ -36,7 +40,7 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = gpui_component_assets::Assets.list(path)?;
         assets.extend(
-            [PLAY, REFRESH, EDIT, TRASH, APP_ICON]
+            [PLAY, REFRESH, EDIT, TRASH, GIT, APP_ICON]
                 .into_iter()
                 .filter(|asset| asset.starts_with(path))
                 .map(Into::into),
@@ -46,6 +50,7 @@ impl AssetSource for Assets {
 }
 
 pub enum ActionIcon {
+    Git,
     Play,
     Refresh,
     Edit,
@@ -56,6 +61,7 @@ pub enum ActionIcon {
 impl From<ActionIcon> for Icon {
     fn from(icon: ActionIcon) -> Self {
         Icon::default().path(match icon {
+            ActionIcon::Git => GIT,
             ActionIcon::Play => PLAY,
             ActionIcon::Refresh => REFRESH,
             ActionIcon::Edit => EDIT,

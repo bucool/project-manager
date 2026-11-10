@@ -23,6 +23,8 @@ use std::{
 };
 
 const TITLE_BAR_HEIGHT: f32 = 40.;
+#[path = "ui_git.rs"]
+mod git_ui;
 actions!(workbench, [CloseOverlay, FocusSearch]);
 #[derive(Clone, PartialEq)]
 enum View {
@@ -141,6 +143,7 @@ impl SortOrder {
 }
 
 pub struct Workbench {
+    git: git_ui::GitUi,
     notes: Entity<crate::notes::Notes>,
     backend: Backend,
     monitor: Monitor,
@@ -537,10 +540,12 @@ impl Workbench {
         })
         .detach();
         let notes = cx.new(|cx| crate::notes::Notes::new(window, cx));
+        let git = git_ui::GitUi::new(window, cx);
         let notes_subscription = cx.observe(&notes, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus);
         Self {
+            git,
             notes,
             backend,
             monitor,
@@ -1490,7 +1495,8 @@ impl Workbench {
                                     })),
                             ),
                     ),
-            );
+            )
+            .child(self.git_controls(&p, cx));
         let art = div()
             .id(SharedString::from(format!("art-{}", p.id)))
             .relative()
@@ -3619,6 +3625,7 @@ impl Workbench {
 }
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.git.begin_frame();
         self.notes
             .update(cx, |notes, cx| notes.initialize(window, cx));
         let english = i18n::english();
@@ -3651,7 +3658,11 @@ impl Render for Workbench {
             })
             .text_size(px(13.))
             .key_context("Workbench")
-            .on_action(cx.listener(|this, _: &CloseOverlay, _, cx| {
+            .on_action(cx.listener(|this, _: &CloseOverlay, window, cx| {
+                if this.git.is_open() {
+                    this.close_git(window, cx);
+                    return;
+                }
                 this.close_settings(cx);
                 this.selected = None;
                 cx.notify();
@@ -3694,6 +3705,7 @@ impl Render for Workbench {
                     .when(self.settings_open, |s| {
                         s.child(self.settings_modal(window, cx))
                     })
+                    .when(self.git.is_open(), |s| s.child(self.git_modal(window, cx)))
                     .when(
                         !self.storage_required
                             && !self.storage_loading
