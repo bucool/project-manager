@@ -43,7 +43,29 @@ impl Status {
 
 pub enum Event {
     Status(String, Status),
-    Finished { path: String, error: Option<String> },
+    Finished {
+        path: String,
+        error: Option<Failure>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub enum FailureStage {
+    Commit,
+    Push,
+}
+impl FailureStage {
+    pub fn label(self) -> &'static str {
+        crate::i18n::tr(match self {
+            Self::Commit => "提交失败",
+            Self::Push => "推送失败",
+        })
+    }
+}
+#[derive(Clone)]
+pub struct Failure {
+    pub stage: FailureStage,
+    pub message: String,
 }
 enum Job {
     Check(String),
@@ -91,9 +113,14 @@ impl Monitor {
                         branch,
                         message,
                     } => {
-                        let error = publish(Path::new(&path), &branch, &message, &cancel)
-                            .err()
-                            .map(|error| format!("{error:#}"));
+                        let mut stage = FailureStage::Commit;
+                        let error =
+                            publish(Path::new(&path), &branch, &message, &cancel, &mut stage)
+                                .err()
+                                .map(|error| Failure {
+                                    stage,
+                                    message: format!("{error:#}"),
+                                });
                         let next = status(Path::new(&path), &cancel);
                         previous.insert(path.clone(), next.clone());
                         if events
@@ -471,7 +498,13 @@ fn config(root: &Path, key: &str, cancel: &AtomicBool) -> Result<Option<String>>
     Ok(Some(String::from_utf8(output.stdout)?.trim().to_owned()))
 }
 
-fn publish(root: &Path, expected_branch: &str, message: &str, cancel: &AtomicBool) -> Result<()> {
+fn publish(
+    root: &Path,
+    expected_branch: &str,
+    message: &str,
+    cancel: &AtomicBool,
+    stage: &mut FailureStage,
+) -> Result<()> {
     ensure!(root.join(".git").exists(), "项目文件夹不是 Git 仓库。");
     let top = checked(root, &["rev-parse", "--show-toplevel"], None, 5, cancel)?;
     ensure!(
@@ -502,6 +535,7 @@ fn publish(root: &Path, expected_branch: &str, message: &str, cancel: &AtomicBoo
             "仓库正在合并或变基，请先在 Git 中完成操作。"
         );
     }
+    *stage = FailureStage::Push;
     let upstream_remote = config(root, &format!("branch.{}.remote", state.branch), cancel)?;
     let remote = config(root, &format!("branch.{}.pushRemote", state.branch), cancel)?
         .or(config(root, "remote.pushDefault", cancel)?)
@@ -525,12 +559,14 @@ fn publish(root: &Path, expected_branch: &str, message: &str, cancel: &AtomicBoo
         .unwrap_or_else(|| format!("refs/heads/{}", state.branch));
     let mut committed = false;
     if !state.changes.is_empty() {
+        *stage = FailureStage::Commit;
         ensure!(!message.trim().is_empty(), "请填写提交说明。");
         checked(root, &["add", "--all", "--", "."], None, 30, cancel)?;
         checked(root, &["commit", "--file=-"], Some(message), 120, cancel)?;
         committed = true;
     }
     let target = format!("HEAD:{merge}");
+    *stage = FailureStage::Push;
     let mut push_args = vec!["push", "--porcelain"];
     if state.upstream.is_empty() {
         push_args.push("--set-upstream");

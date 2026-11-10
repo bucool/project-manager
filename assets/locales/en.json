@@ -336,5 +336,7 @@
   "提交成功，但推送失败。提交已保留，可重试推送。": "Commit succeeded, but push failed. Your commit is saved; retry to push it.",
   "推送失败，请检查远程仓库、网络或登录凭据。": "Push failed. Check the remote, network and Git credentials.",
   "Git 仓库根目录与项目目录不一致，请在终端中处理。": "The Git root differs from the project folder. Manage this repository in a terminal.",
-  "* 部分未跟踪文件较大，新增行数未全部统计；提交仍包含全部改动。": "* Some untracked files are large, so added-line totals are partial. All changes will still be committed."
+  "* 部分未跟踪文件较大，新增行数未全部统计；提交仍包含全部改动。": "* Some untracked files are large, so added-line totals are partial. All changes will still be committed.",
+  "提交失败": "Commit failed",
+  "推送失败": "Push failed"
 }

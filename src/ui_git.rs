@@ -1,11 +1,12 @@
 //! Project-card Git controls and the commit/push dialog.
 use super::*;
-use crate::project_git::{self, Status};
+use crate::project_git::{self, Failure, Status};
 use std::{cell::RefCell, collections::HashMap};
 
 pub(super) struct GitUi {
     monitor: project_git::Monitor,
     states: HashMap<String, Status>,
+    failures: HashMap<String, Failure>,
     visible: RefCell<HashSet<String>>,
     input: Entity<InputState>,
     dialog: Option<Project>,
@@ -27,34 +28,46 @@ impl GitUi {
                             }
                             project_git::Event::Finished { path, error } => {
                                 this.git.active = None;
-                                if let Some(error) = error {
-                                    this.git.error = error;
-                                } else {
-                                    this.git.error.clear();
-                                    if this
-                                        .git
-                                        .dialog
-                                        .as_ref()
-                                        .is_some_and(|project| project.path == path)
-                                    {
-                                        this.git.dialog = None;
-                                        this.focus.focus(window);
-                                    }
-                                    this.message = tr("提交并推送完成").into();
-                                    this.message_at = Instant::now();
-                                    this.error = false;
-                                    let stamp = this.message_at;
-                                    this.toast_timer = Some(cx.spawn(async move |this, cx| {
-                                        Timer::after(Duration::from_secs(5)).await;
-                                        let _ = this.update(cx, |this, cx| {
-                                            if this.message_at == stamp && !this.busy && !this.error
-                                            {
-                                                this.message.clear();
-                                                cx.notify();
-                                            }
-                                        });
-                                    }));
+                                this.git.error.clear();
+                                if this
+                                    .git
+                                    .dialog
+                                    .as_ref()
+                                    .is_some_and(|project| project.path == path)
+                                {
+                                    this.git.dialog = None;
+                                    this.focus.focus(window);
                                 }
+                                let name = this
+                                    .snapshot
+                                    .projects
+                                    .iter()
+                                    .find(|project| project.path == path)
+                                    .map(|project| project.name.as_str())
+                                    .unwrap_or("");
+                                if let Some(failure) = error {
+                                    this.message = format!("{} · {}", failure.stage.label(), name);
+                                    this.error = true;
+                                    this.git.failures.insert(path, failure);
+                                } else {
+                                    this.git.failures.remove(&path);
+                                    this.message = format!("{} · {}", tr("提交并推送完成"), name);
+                                    this.error = false;
+                                }
+                                this.message_at = Instant::now();
+                                let stamp = this.message_at;
+                                this.toast_timer = Some(cx.spawn(async move |this, cx| {
+                                    Timer::after(Duration::from_secs(5)).await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        // Git failure toasts expire as well. The card retains
+                                        // the failure and its diagnostic until the next attempt.
+                                        if this.message_at == stamp && !this.busy {
+                                            this.message.clear();
+                                            this.error = false;
+                                            cx.notify();
+                                        }
+                                    });
+                                }));
                             }
                         }
                         cx.notify();
@@ -89,6 +102,7 @@ impl GitUi {
         Self {
             monitor,
             states: HashMap::new(),
+            failures: HashMap::new(),
             visible: RefCell::new(HashSet::new()),
             input,
             dialog: None,
@@ -131,7 +145,7 @@ impl Workbench {
         }
     }
 
-    fn submit_git(&mut self, cx: &mut Context<Self>) {
+    fn submit_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.git.active.is_some() {
             return;
         }
@@ -154,6 +168,9 @@ impl Workbench {
         {
             self.git.error.clear();
             self.git.active = Some(project.path.clone());
+            self.git.failures.remove(&project.path);
+            self.git.dialog = None;
+            self.focus.focus(window);
         } else {
             self.git.error = tr("Git 后台繁忙，请稍后重试。").into();
         }
@@ -209,7 +226,23 @@ impl Workbench {
                             0xc44b4b,
                         )
                         .font_weight(FontWeight::SEMIBOLD),
-                    ),
+                    )
+                    .when_some(self.git.failures.get(&project.path), |s, failure| {
+                        let message = failure
+                            .message
+                            .split(": ")
+                            .map(i18n::message)
+                            .collect::<Vec<_>>()
+                            .join(": ");
+                        s.child(
+                            text(failure.stage.label(), 12., 0xc44b4b)
+                                .font_weight(FontWeight::MEDIUM)
+                                .id(SharedString::from(format!("git-failure-{}", project.id)))
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(message.clone()).build(window, cx)
+                                }),
+                        )
+                    }),
             )
             .child(
                 Button::new(SharedString::from(format!("git-publish-{}", project.id)))
@@ -452,7 +485,9 @@ impl Workbench {
                                 tr("提交并推送")
                             })
                             .disabled(working || !ready)
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_git(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.submit_git(window, cx)),
+                            ),
                     ),
             );
         self.overlay(panel).into_any_element()
