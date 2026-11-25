@@ -36,7 +36,7 @@ Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/
 
 ## Build
 
-Requirements: Windows 10/11 x64, stable Rust MSVC, Visual Studio C++ Build Tools with Windows SDK, Node.js 20+, and WebView2 Runtime for previews.
+Requirements: Windows 10/11 x64, stable Rust MSVC, Visual Studio C++ Build Tools with Windows SDK, Node.js 20.6+, and WebView2 Runtime for previews.
 
 ```powershell
 git clone https://github.com/bucool/project-manager.git

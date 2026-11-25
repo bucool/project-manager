@@ -424,7 +424,8 @@ mod windows {
         let (ports, _) = listeners()?;
         let mut identities = HashMap::from([(root, Some(started))]);
         let mut owned = Vec::new();
-        for ((pid, port), addresses) in ports {
+        let mut owned_listeners = HashSet::new();
+        for (&(pid, port), addresses) in &ports {
             let mut current = pid;
             let mut chain = Vec::new();
             // Include shells spawned by npm, but never cross beyond our own root.
@@ -459,10 +460,24 @@ mod windows {
                 false
             });
             if valid {
+                owned_listeners.insert((pid, port));
                 owned.push(serde_json::json!({ "pid": pid, "port": port, "addresses": addresses }));
             }
         }
-        Ok(serde_json::json!({ "alive": true, "started": started.to_string(), "listeners": owned }))
+        // Windows can allow one process on 127.0.0.1:PORT and another on
+        // 0.0.0.0:PORT. The wildcard listener alone does not prove which project
+        // a loopback request will reach. Never accept such a shared port.
+        let owned_ports: HashSet<_> = owned_listeners.iter().map(|(_, port)| *port).collect();
+        let blocked: BTreeSet<_> = ports
+            .keys()
+            .filter(|(pid, port)| {
+                owned_ports.contains(port) && !owned_listeners.contains(&(*pid, *port))
+            })
+            .map(|(_, port)| *port)
+            .collect();
+        Ok(
+            serde_json::json!({ "alive": true, "started": started.to_string(), "listeners": owned, "blockedPorts": blocked }),
+        )
     }
 
     fn runtime(name: &str) -> Option<&'static str> {

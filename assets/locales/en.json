@@ -342,5 +342,7 @@
   "无法验证项目端口，请从 Windows 版 Project Manager 启动。": "Could not verify the project port. Launch it from Project Manager for Windows.",
   "无法验证项目端口": "Could not verify project port ownership",
   "无法验证项目端口：系统返回无效结果。": "Could not verify project port ownership: invalid system response.",
-  "项目启动进程已退出，请查看运行日志。": "The project launch process exited. Check the run logs."
+  "项目启动进程已退出，请查看运行日志。": "The project launch process exited. Check the run logs.",
+  "无法分配空闲端口，请稍后重试。": "Could not allocate an available port. Try again shortly.",
+  "项目端口与其他进程共享，正在重新分配空闲端口。": "This port is shared with another process. Allocating a different port."
 }

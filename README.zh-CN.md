@@ -36,7 +36,7 @@ Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、
 
 ## 构建
 
-环境要求：Windows 10/11 x64、稳定版 Rust MSVC、带 Windows SDK 的 Visual Studio C++ Build Tools、Node.js 20+；截图需要 WebView2 Runtime。
+环境要求：Windows 10/11 x64、稳定版 Rust MSVC、带 Windows SDK 的 Visual Studio C++ Build Tools、Node.js 20.6+；截图需要 WebView2 Runtime。
 
 ```powershell
 git clone https://github.com/bucool/project-manager.git

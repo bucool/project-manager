@@ -7,7 +7,7 @@ import { spawn, execFile } from 'node:child_process';
 import { createCaptureWorker } from './capture.mjs';
 import { detectProjectTypes, projectCategories } from './project-types.mjs';
 import { startLanPreview } from './lan-preview.mjs';
-import { recordLaunchOutput, readyProjectUrl, stillOwnsProjectUrl } from './project-launch.mjs';
+import { prepareProjectLaunch, recordLaunchOutput, readyProjectUrl, stillOwnsProjectUrl } from './project-launch.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 if (!process.env.GPM_DATA_DIR || !path.isAbsolute(process.env.GPM_DATA_DIR)) {
@@ -216,12 +216,13 @@ function snapshot() {
   }) };
 }
 
-async function startProject(project, owner = 'user') {
+async function startProject(project, owner = 'user', portAttempt = 0) {
   let session = sessions.get(project.id);
   if (session?.stopping) await session.stopping;
   if (session && ['starting', 'running'].includes(session.status)) {
     if (owner === 'user') session.owner = 'user';
     await session.ready;
+    session = sessions.get(project.id) || session;
     if (session.status === 'running' && await stillOwnsProjectUrl(session)) {
       await enableLanPreview(session);
       return session;
@@ -236,8 +237,15 @@ async function startProject(project, owner = 'user') {
   sessions.set(project.id, session);
   session.ready = (async () => {
     if (project.script) {
-      const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-      session.child = spawn(process.execPath, [npmCli, 'run', project.script], { cwd: project.path, env: { ...process.env, BROWSER: 'none', FORCE_COLOR: '0' }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const npmCli = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+      session.launch = await prepareProjectLaunch(project);
+      if (session.status !== 'starting') {
+        session.launch.release();
+        throw new Error('启动已取消');
+      }
+      session.child = spawn(process.execPath, [npmCli, '--prefix', project.path, '--node-options', session.launch.env.NODE_OPTIONS, 'run', project.script], {
+        cwd: project.path, env: session.launch.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      });
     } else {
       session.child = spawn(process.execPath, [path.join(here, 'static-server.mjs'), project.path], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     }
@@ -245,6 +253,7 @@ async function startProject(project, owner = 'user') {
     session.child.stderr.on('data', data => recordLaunchOutput(session, data, 'stderr'));
     session.child.on('error', error => { session.lan?.close(); session.status = 'error'; session.url = null; session.error = error.message; });
     session.child.on('exit', code => {
+      session.launch?.release();
       session.lan?.close();
       session.url = null;
       if (!['idle', 'stopping', 'error'].includes(session.status)) { session.status = 'error'; session.error = `启动进程已退出（${code}）`; }
@@ -270,8 +279,13 @@ async function startProject(project, owner = 'user') {
     session.status = 'error';
     session.error = error.message;
     // Failed launches must not leave their watcher/build process running.
+    let cleaned = true;
     try { await terminateChild(session.child); }
-    catch (cleanup) { session.error += `\n${cleanup.message}`; }
+    catch (cleanup) { cleaned = false; session.error += `\n${cleanup.message}`; }
+    session.launch?.release();
+    if (cleaned && portAttempt < 4 && (error.code === 'GPM_PORT_CONFLICT' || /EADDRINUSE|address already in use|Port \d+ is already in use/i.test(session.logs))) {
+      return startProject(project, session.owner, portAttempt + 1);
+    }
     throw new Error(session.error);
   });
   return session.ready;
@@ -303,6 +317,7 @@ async function stopProject(id) {
   session.lanError = null;
   session.stopping = (async () => {
     await terminateChild(session.child);
+    session.launch?.release();
     session.status = 'idle';
     session.url = null;
     session.error = null;
