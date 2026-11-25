@@ -134,6 +134,11 @@ fn discover(workspace: &std::path::Path) -> Discovery {
 }
 
 #[cfg(windows)]
+pub fn project_listeners(pid: u32, expected: Option<u64>) -> anyhow::Result<serde_json::Value> {
+    windows::project_listeners(pid, expected)
+}
+
+#[cfg(windows)]
 mod windows {
     use super::{DevServer, Discovery};
     use anyhow::{Context, Result, bail};
@@ -400,6 +405,64 @@ mod windows {
             current = process.parent;
         }
         chain
+    }
+
+    pub fn project_listeners(root: u32, expected: Option<u64>) -> Result<serde_json::Value> {
+        // This lightweight query only reads process ancestry and TCP tables.
+        // It does not initialize GPUI, enumerate command lines or open projects.
+        let identity = (root != 0)
+            .then(|| process_identity(root))
+            .transpose()
+            .ok()
+            .flatten();
+        let Some(started) =
+            identity.filter(|started| expected.is_none_or(|value| value == *started))
+        else {
+            return Ok(serde_json::json!({ "alive": false, "listeners": [] }));
+        };
+        let processes = processes()?;
+        let (ports, _) = listeners()?;
+        let mut identities = HashMap::from([(root, Some(started))]);
+        let mut owned = Vec::new();
+        for ((pid, port), addresses) in ports {
+            let mut current = pid;
+            let mut chain = Vec::new();
+            // Include shells spawned by npm, but never cross beyond our own root.
+            for _ in 0..64 {
+                if current == 0 || chain.contains(&current) {
+                    break;
+                }
+                chain.push(current);
+                if current == root {
+                    break;
+                }
+                let Some(process) = processes.get(&current) else {
+                    break;
+                };
+                current = process.parent;
+            }
+            if chain.last() != Some(&root) {
+                continue;
+            }
+            let mut child_created = u64::MAX;
+            let valid = chain.iter().all(|pid| {
+                let identity = identities
+                    .entry(*pid)
+                    .or_insert_with(|| process_identity(*pid).ok());
+                if let Some(created) = *identity {
+                    // A reused parent PID is newer than its alleged child.
+                    if created >= started && created <= child_created {
+                        child_created = created;
+                        return true;
+                    }
+                }
+                false
+            });
+            if valid {
+                owned.push(serde_json::json!({ "pid": pid, "port": port, "addresses": addresses }));
+            }
+        }
+        Ok(serde_json::json!({ "alive": true, "started": started.to_string(), "listeners": owned }))
     }
 
     fn runtime(name: &str) -> Option<&'static str> {

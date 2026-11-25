@@ -7,6 +7,7 @@ import { spawn, execFile } from 'node:child_process';
 import { createCaptureWorker } from './capture.mjs';
 import { detectProjectTypes, projectCategories } from './project-types.mjs';
 import { startLanPreview } from './lan-preview.mjs';
+import { recordLaunchOutput, readyProjectUrl, stillOwnsProjectUrl } from './project-launch.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 if (!process.env.GPM_DATA_DIR || !path.isAbsolute(process.env.GPM_DATA_DIR)) {
@@ -215,21 +216,19 @@ function snapshot() {
   }) };
 }
 
-function addLogs(session, chunk) {
-  const line = chunk.toString().replace(/\x1b\[[0-9;]*m/g, '');
-  session.logs = (session.logs + line).slice(-10000);
-  const match = line.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+\/?[^\s]*/);
-  if (match && !session.url) session.url = match[0].replace('0.0.0.0', '127.0.0.1').replace('localhost', '127.0.0.1');
-}
-
 async function startProject(project, owner = 'user') {
   let session = sessions.get(project.id);
   if (session?.stopping) await session.stopping;
   if (session && ['starting', 'running'].includes(session.status)) {
     if (owner === 'user') session.owner = 'user';
     await session.ready;
-    await enableLanPreview(session);
-    return session;
+    if (session.status === 'running' && await stillOwnsProjectUrl(session)) {
+      await enableLanPreview(session);
+      return session;
+    }
+    // A former port may now belong to a different project. Stop only our own
+    // launcher tree and start afresh instead of opening its stale URL.
+    await stopProject(project.id);
   }
   if (installJobs.has(project.id)) throw new Error('正在安装依赖，请稍候。');
   if (!project.dependenciesInstalled || dependencyState.get(project.id)?.state === 'error') throw new Error('项目尚未安装依赖，请先点击“安装依赖”。');
@@ -242,34 +241,39 @@ async function startProject(project, owner = 'user') {
     } else {
       session.child = spawn(process.execPath, [path.join(here, 'static-server.mjs'), project.path], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     }
-    session.child.stdout.on('data', data => addLogs(session, data));
-    session.child.stderr.on('data', data => addLogs(session, data));
-    session.child.on('error', error => { session.lan?.close(); session.status = 'error'; session.error = error.message; });
+    session.child.stdout.on('data', data => recordLaunchOutput(session, data, 'stdout'));
+    session.child.stderr.on('data', data => recordLaunchOutput(session, data, 'stderr'));
+    session.child.on('error', error => { session.lan?.close(); session.status = 'error'; session.url = null; session.error = error.message; });
     session.child.on('exit', code => {
       session.lan?.close();
-      if (!['idle', 'stopping'].includes(session.status)) { session.status = 'error'; session.error = `启动进程已退出（${code}）`; }
+      session.url = null;
+      if (!['idle', 'stopping', 'error'].includes(session.status)) { session.status = 'error'; session.error = `启动进程已退出（${code}）`; }
     });
     const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
       if (session.status === 'error') throw new Error(session.error);
       if (['idle', 'stopping'].includes(session.status)) throw new Error('启动已取消');
-      if (session.url) {
-        try {
-          const response = await fetch(session.url, { signal: AbortSignal.timeout(2000) });
-          if (response.ok && session.status === 'starting') {
-            session.status = 'running';
-            await enableLanPreview(session);
-            return session;
-          }
-        } catch {}
+      const address = await readyProjectUrl(session);
+      if (address && session.status === 'starting') {
+        session.url = address;
+        session.status = 'running';
+        await enableLanPreview(session);
+        return session;
       }
-      await sleep(350);
+      await sleep(700);
     }
-    await stopProject(project.id);
+    throw new Error('60 秒内未能启动，请查看运行日志。');
+  })().catch(async error => {
+    if (['idle', 'stopping'].includes(session.status)) throw error;
+    session.lan?.close();
+    session.url = null;
     session.status = 'error';
-    session.error = '60 秒内未能启动，请查看运行日志。';
+    session.error = error.message;
+    // Failed launches must not leave their watcher/build process running.
+    try { await terminateChild(session.child); }
+    catch (cleanup) { session.error += `\n${cleanup.message}`; }
     throw new Error(session.error);
-  })();
+  });
   return session.ready;
 }
 

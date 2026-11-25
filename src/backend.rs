@@ -426,7 +426,7 @@ impl Backend {
                                 if let Some(url) = snapshot
                                     .projects
                                     .iter()
-                                    .find(|p| p.id == id)
+                                    .find(|p| p.id == id && p.status == "running")
                                     .and_then(|p| p.url.as_ref())
                                 {
                                     open(url)?;

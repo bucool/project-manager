@@ -22,6 +22,26 @@ use gpui_component::{Root, Theme, ThemeMode};
 use ui::{CloseOverlay, FocusSearch, Workbench};
 fn main() {
     #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--project-listeners")) {
+        let result = (|| -> anyhow::Result<()> {
+            let pid = std::env::args()
+                .nth(2)
+                .ok_or_else(|| anyhow::anyhow!("Missing project PID"))?
+                .parse()?;
+            let expected = std::env::args()
+                .nth(3)
+                .map(|value| value.parse())
+                .transpose()?;
+            println!("{}", dev_servers::project_listeners(pid, expected)?);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(windows)]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--capture-webview2")) {
         if let Err(error) = webview_capture::run() {
             eprintln!("{error:#}");
