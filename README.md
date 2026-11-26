@@ -30,7 +30,7 @@ Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Ru
 
 Notes are available from the sidebar, with tabs, automatic saving, Markdown rendered directly in the note, with in-place paragraph editing. Pasted images (Ctrl+V) appear in the document at the cursor position and are stored locally. Change the notes folder in **Settings → Notes**; existing notes and images are moved to the new folder after verification. Notes stay local.
 
-**Visual references** and **Inspiration** in the sidebar are independent collections, each with links, images, and videos tabs. Add links or select multiple media files, then click a reference to open it with your default browser, image viewer, or video player. References and image thumbnails stay in your chosen data folder; media files remain in their original locations. Removing a reference does not delete its source file.
+**Visual references** and **Inspiration** in the sidebar are independent collections, each with links, images, and videos tabs. Copy links with the copy icon or click a link to open it in Microsoft Edge. Images and videos appear as large thumbnail cards; click one to open your default image viewer or video player. Video thumbnails use Windows codecs when available. References and thumbnails stay in your chosen data folder; media files remain in their original locations. Removing a reference does not delete its source file.
 
 ## Download
 

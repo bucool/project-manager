@@ -10,6 +10,8 @@ use gpui_component::{
     scroll::{Scrollbar, ScrollbarShow},
 };
 use serde::{Deserialize, Serialize};
+#[path = "inspiration_media.rs"]
+mod media;
 use std::{
     fs,
     io::Write,
@@ -174,7 +176,7 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
 }
 fn thumbnail_path(root: &Path, id: &str) -> PathBuf {
-    root.join("thumbnails").join(format!("{id}.jpg"))
+    root.join("thumbnails").join(format!("{id}-large.jpg"))
 }
 fn save(root: &Path, library: &Library) -> Result<()> {
     fs::create_dir_all(root)?;
@@ -212,24 +214,36 @@ fn load(root: &Path) -> Result<Library> {
                 "Invalid media type"
             );
         }
-        entry.thumbnail = entry.kind == Kind::Image && thumbnail_path(root, &entry.id).is_file();
+        entry.thumbnail = entry.kind != Kind::Link && thumbnail_path(root, &entry.id).is_file();
     }
     Ok(library)
 }
 fn make_thumbnail(root: &Path, entry: &Entry) -> Result<()> {
-    let mut reader = image::ImageReader::open(&entry.target)?.with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    reader.limits(limits);
-    let image = reader.decode()?.thumbnail(384, 240).into_rgba8();
-    let mut canvas = image::RgbaImage::from_pixel(384, 240, image::Rgba([244, 245, 240, 255]));
+    let source = if entry.kind == Kind::Video {
+        media::video_thumbnail(&entry.target)?
+    } else {
+        let mut reader = image::ImageReader::open(&entry.target)?.with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        reader.limits(limits);
+        reader.decode()?
+    };
+    // Shell providers may return an older, smaller cached frame. Scale it to
+    // fit the card too, rather than centering a tiny frame in a large canvas.
+    let image = if source.width() < 768 && source.height() < 480 {
+        source.resize(768, 480, image::imageops::FilterType::Triangle)
+    } else {
+        source.thumbnail(768, 480)
+    }
+    .into_rgba8();
+    let mut canvas = image::RgbaImage::from_pixel(768, 480, image::Rgba([244, 245, 240, 255]));
     image::imageops::overlay(
         &mut canvas,
         &image,
-        ((384 - image.width()) / 2) as i64,
-        ((240 - image.height()) / 2) as i64,
+        ((768 - image.width()) / 2) as i64,
+        ((480 - image.height()) / 2) as i64,
     );
     let directory = root.join("thumbnails");
     fs::create_dir_all(&directory)?;
@@ -261,10 +275,23 @@ fn worker(jobs: mpsc::Receiver<Job>, events: async_channel::Sender<Event>) {
             let result = load(&directory);
             if let Ok(loaded) = &result {
                 library = loaded.clone();
+                let _ = events.send_blocking(Event {
+                    root: directory.clone(),
+                    library: Some(library.clone()),
+                    done: false,
+                    close_dialog: false,
+                    message: "正在读取缩略图…",
+                    error: None,
+                });
+                for entry in &mut library.entries {
+                    if entry.kind != Kind::Link && !entry.thumbnail {
+                        entry.thumbnail = make_thumbnail(&directory, entry).is_ok();
+                    }
+                }
             }
             let _ = events.send_blocking(Event {
                 root: directory,
-                library: result.as_ref().ok().cloned(),
+                library: result.as_ref().ok().map(|_| library.clone()),
                 done: true,
                 close_dialog: false,
                 message: "已保存",
@@ -361,7 +388,7 @@ fn worker(jobs: mpsc::Receiver<Job>, events: async_channel::Sender<Event>) {
                         message: "正在导入…",
                         error: None,
                     });
-                    if kind == Kind::Image {
+                    if kind != Kind::Link {
                         for id in ids {
                             if let Some(entry) =
                                 library.entries.iter_mut().find(|entry| entry.id == id)
@@ -389,15 +416,15 @@ fn worker(jobs: mpsc::Receiver<Job>, events: async_channel::Sender<Event>) {
                 }
                 Job::Open(entry) => {
                     if entry.kind == Kind::Link {
-                        validate_url(&entry.target)?;
+                        media::open_link(&entry.target)?;
                     } else {
                         ensure!(
                             Path::new(&entry.target).is_file(),
                             "{}",
                             tr("文件已移动或删除，请重新添加。")
                         );
+                        backend::open(&entry.target)?;
                     }
-                    backend::open(&entry.target)?;
                 }
                 Job::Load(_) | Job::Flush(_) => unreachable!(),
             }
@@ -435,7 +462,7 @@ pub struct Inspiration {
     url: Entity<InputState>,
     focus: FocusHandle,
     list: ListState,
-    list_key: (Kind, Vec<String>),
+    list_key: (Kind, Vec<String>, usize, i32),
     smooth: SmoothScroll,
     localized_english: bool,
     _subscriptions: Vec<Subscription>,
@@ -506,7 +533,7 @@ impl Inspiration {
             url,
             focus: cx.focus_handle(),
             list: ListState::new(0, ListAlignment::Top, px(300.)),
-            list_key: (Kind::Link, Vec::new()),
+            list_key: (Kind::Link, Vec::new(), 1, 0),
             smooth: SmoothScroll::default(),
             localized_english: crate::i18n::english(),
             _subscriptions: subscriptions,
@@ -617,6 +644,7 @@ impl Inspiration {
         let colors = self.colors;
         let open = entry.clone();
         let id = entry.id.clone();
+        let copy_link = entry.target.clone();
         let mut art = div()
             .w(px(112.))
             .h(px(70.))
@@ -706,6 +734,26 @@ impl Inspiration {
                                 )
                             }),
                     )
+                    .when(entry.kind == Kind::Link, |s| {
+                        s.child(
+                            Button::new(SharedString::from(format!("copy-reference-{id}")))
+                                .ghost()
+                                .icon(IconName::Copy)
+                                .tooltip(tr("复制链接"))
+                                .w(px(36.))
+                                .h(px(36.))
+                                .disabled(self.busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_link.clone(),
+                                    ));
+                                    this.status = tr("链接已复制").into();
+                                    this.failed = false;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         Button::new(SharedString::from(format!("remove-reference-{id}")))
                             .ghost()
@@ -727,6 +775,148 @@ impl Inspiration {
                         }
                     })),
             )
+            .into_any_element()
+    }
+
+    fn media_card(&self, entry: Entry, width: f32, cx: &Context<Self>) -> AnyElement {
+        let colors = self.colors;
+        let open = entry.clone();
+        let id = entry.id.clone();
+        let height = width * 0.625;
+        let mut preview = div()
+            .relative()
+            .w(px(width))
+            .h(px(height))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(rgb(colors.soft))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2();
+        if entry.thumbnail {
+            if let Some(root) = &self.root {
+                preview = preview.child(
+                    img(thumbnail_path(root, &entry.id))
+                        .w(px(width))
+                        .h(px(height))
+                        .object_fit(ObjectFit::Contain),
+                );
+            }
+        } else {
+            preview = preview
+                .child(
+                    Icon::new(entry.kind.icon())
+                        .size(px(42.))
+                        .text_color(rgb(colors.accent)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors.muted))
+                        .child(tr("暂无缩略图")),
+                );
+        }
+        if entry.kind == Kind::Video {
+            preview = preview.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(48.))
+                            .h(px(48.))
+                            .rounded_full()
+                            .bg(rgba(0x00000088))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(crate::assets::ActionIcon::Play)
+                                    .size(px(24.))
+                                    .text_color(rgb(0xffffff)),
+                            ),
+                    ),
+            );
+        }
+        div()
+            .id(SharedString::from(format!("media-reference-{id}")))
+            .w(px(width))
+            .flex_shrink_0()
+            .rounded(px(12.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(colors.line))
+            .bg(rgb(colors.surface))
+            .hover(move |s| s.border_color(rgb(colors.accent_border)))
+            .cursor_pointer()
+            .child(preview)
+            .child(
+                div()
+                    .p_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(entry.title),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors.muted))
+                                    .child(format!(
+                                        "{} · {}",
+                                        Path::new(&entry.target)
+                                            .extension()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_uppercase(),
+                                        format_bytes(entry.bytes)
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(colors.muted))
+                                    .truncate()
+                                    .child(entry.target),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("remove-media-{id}")))
+                            .ghost()
+                            .icon(crate::assets::ActionIcon::Trash)
+                            .tooltip(tr("移除记录"))
+                            .w(px(36.))
+                            .h(px(36.))
+                            .disabled(self.busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.dialog = Some(Dialog::Remove(id.clone()));
+                                this.focus.focus(window);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.busy {
+                    this.send(Job::Open(open.clone()), "正在打开…", cx);
+                }
+            }))
             .into_any_element()
     }
     fn modal(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -864,13 +1054,27 @@ impl Render for Inspiration {
             .filter(|entry| entry.kind == self.active)
             .cloned()
             .collect();
+        let available = (f32::from(window.viewport_size().width) - 228. - 48. - 16.).max(200.);
+        let columns = if self.active == Kind::Link {
+            1
+        } else {
+            ((available + 16.) / 336.).floor().max(1.) as usize
+        };
+        let card_width = (available - (columns - 1) as f32 * 16.) / columns as f32;
+        let row_count = entries.len().div_ceil(columns);
         let key = (
             self.active,
             entries.iter().map(|entry| entry.id.clone()).collect(),
+            columns,
+            if self.active == Kind::Link {
+                0
+            } else {
+                card_width.round() as i32
+            },
         );
         if self.list_key != key {
             self.smooth.cancel();
-            self.list.reset(entries.len());
+            self.list.reset(row_count);
             self.list_key = key;
         }
         let empty = entries.is_empty();
@@ -1051,7 +1255,21 @@ impl Render for Inspiration {
                             list(
                                 self.list.clone(),
                                 cx.processor(move |this, index: usize, _, cx| {
-                                    this.row(entries[index].clone(), cx)
+                                    if this.active == Kind::Link {
+                                        this.row(entries[index].clone(), cx)
+                                    } else {
+                                        let start = index * columns;
+                                        let end = (start + columns).min(entries.len());
+                                        div()
+                                            .flex()
+                                            .gap(px(16.))
+                                            .pr(px(16.))
+                                            .pb_4()
+                                            .children(entries[start..end].iter().map(|entry| {
+                                                this.media_card(entry.clone(), card_width, cx)
+                                            }))
+                                            .into_any_element()
+                                    }
                                 }),
                             )
                             .size_full(),
