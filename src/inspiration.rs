@@ -1,6 +1,6 @@
 //! Local visual references. Media stays at its original location; only small
 //! thumbnails and the reference index live in the user's configured data folder.
-use crate::{backend, i18n::tr, smooth_scroll::SmoothScroll, theme::Colors};
+use crate::{i18n::tr, smooth_scroll::SmoothScroll, theme::Colors};
 use anyhow::{Context as _, Result, ensure};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -128,7 +128,7 @@ enum Job {
     AddLink { title: String, target: String },
     Import { kind: Kind, paths: Vec<PathBuf> },
     Remove(String),
-    Open(Entry),
+    OpenLink(String),
     Flush(mpsc::Sender<()>),
 }
 struct Event {
@@ -414,18 +414,7 @@ fn worker(jobs: mpsc::Receiver<Job>, events: async_channel::Sender<Event>) {
                     close_dialog = true;
                     message = "已移除";
                 }
-                Job::Open(entry) => {
-                    if entry.kind == Kind::Link {
-                        media::open_link(&entry.target)?;
-                    } else {
-                        ensure!(
-                            Path::new(&entry.target).is_file(),
-                            "{}",
-                            tr("文件已移动或删除，请重新添加。")
-                        );
-                        backend::open(&entry.target)?;
-                    }
-                }
+                Job::OpenLink(address) => media::open_link(&address)?,
                 Job::Load(_) | Job::Flush(_) => unreachable!(),
             }
             Ok(())
@@ -771,7 +760,7 @@ impl Inspiration {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.busy {
-                            this.send(Job::Open(open.clone()), "正在打开…", cx);
+                            this.send(Job::OpenLink(open.target.clone()), "正在打开…", cx);
                         }
                     })),
             )
@@ -782,6 +771,11 @@ impl Inspiration {
         let colors = self.colors;
         let open = entry.clone();
         let id = entry.id.clone();
+        let thumbnail = self
+            .root
+            .as_ref()
+            .filter(|_| entry.thumbnail)
+            .map(|root| thumbnail_path(root, &entry.id));
         let height = width * 0.625;
         let mut preview = div()
             .relative()
@@ -913,8 +907,16 @@ impl Inspiration {
                     ),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.busy {
-                    this.send(Job::Open(open.clone()), "正在打开…", cx);
+                if let Err(error) = crate::media_viewer::open(
+                    open.target.clone(),
+                    open.kind == Kind::Video,
+                    thumbnail.clone(),
+                    this.colors,
+                    cx,
+                ) {
+                    this.status = format!("{error:#}");
+                    this.failed = true;
+                    cx.notify();
                 }
             }))
             .into_any_element()
@@ -1241,10 +1243,10 @@ impl Render for Inspiration {
                                         .child(match self.active {
                                             Kind::Link => tr("添加喜欢的网站、作品或参考链接。"),
                                             Kind::Image => {
-                                                tr("添加图片，点击后使用默认看图软件打开。")
+                                                tr("添加图片，点击后使用内置图片查看器打开。")
                                             }
                                             Kind::Video => {
-                                                tr("添加视频，点击后使用默认视频软件打开。")
+                                                tr("添加视频，点击后使用内置播放器打开。")
                                             }
                                         }),
                                 ),

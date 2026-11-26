@@ -4,6 +4,9 @@ mod backend;
 mod dev_servers;
 mod i18n;
 mod inspiration;
+#[cfg(windows)]
+mod media_player;
+mod media_viewer;
 mod notes;
 mod preview_cache;
 mod project_git;
