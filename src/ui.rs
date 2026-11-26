@@ -33,12 +33,13 @@ enum View {
     Running,
     Notes,
     Inspiration,
+    Ideas,
     Directory(String),
 }
 impl View {
     fn includes(&self, project: &Project) -> bool {
         match self {
-            Self::Notes | Self::Inspiration => false,
+            Self::Notes | Self::Inspiration | Self::Ideas => false,
             Self::All => true,
             Self::Favorites => project.favorite,
             Self::Running => project.status == "running",
@@ -50,6 +51,7 @@ impl View {
         match self {
             Self::Notes => tr("笔记").into(),
             Self::Inspiration => tr("审美记录").into(),
+            Self::Ideas => tr("灵感").into(),
             Self::All => tr("项目库").into(),
             Self::Favorites => tr("我的收藏").into(),
             Self::Running => tr("正在运行").into(),
@@ -148,6 +150,7 @@ pub struct Workbench {
     git: git_ui::GitUi,
     notes: Entity<crate::notes::Notes>,
     inspiration: Entity<crate::inspiration::Inspiration>,
+    ideas: Entity<crate::inspiration::Inspiration>,
     backend: Backend,
     monitor: Monitor,
     discovery: Discovery,
@@ -543,16 +546,19 @@ impl Workbench {
         })
         .detach();
         let notes = cx.new(|cx| crate::notes::Notes::new(window, cx));
-        let inspiration = cx.new(|cx| crate::inspiration::Inspiration::new(window, cx));
+        let inspiration = cx.new(|cx| crate::inspiration::Inspiration::new(crate::inspiration::Collection::Aesthetics, window, cx));
+        let ideas = cx.new(|cx| crate::inspiration::Inspiration::new(crate::inspiration::Collection::Ideas, window, cx));
         let git = git_ui::GitUi::new(window, cx);
         let notes_subscription = cx.observe(&notes, |_, _, cx| cx.notify());
         let inspiration_subscription = cx.observe(&inspiration, |_, _, cx| cx.notify());
+        let ideas_subscription = cx.observe(&ideas, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus);
         Self {
             git,
             notes,
             inspiration,
+            ideas,
             backend,
             monitor,
             discovery: Discovery::default(),
@@ -602,6 +608,7 @@ impl Workbench {
             _subscriptions: vec![
                 notes_subscription,
                 inspiration_subscription,
+                ideas_subscription,
                 subscription,
                 storage_subscription,
             ],
@@ -999,6 +1006,7 @@ impl Workbench {
                     (View::Running, tr("正在运行"), IconName::ExternalLink, running),
                     (View::Notes, tr("笔记"), IconName::Folder, self.notes.read(cx).count()),
                     (View::Inspiration, tr("审美记录"), IconName::Palette, self.inspiration.read(cx).count()),
+                    (View::Ideas, tr("灵感"), IconName::Sun, self.ideas.read(cx).count()),
                 ]
                 .into_iter()
                 .enumerate()
@@ -2126,6 +2134,11 @@ impl Workbench {
     }
 
     fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.view == View::Ideas {
+            let colors = self.colors();
+            self.ideas.update(cx, |view, _| view.colors = colors);
+            return self.ideas.clone().into_any_element();
+        }
         if self.view == View::Inspiration {
             let colors = self.colors();
             self.inspiration.update(cx, |view, _| view.colors = colors);
@@ -3042,6 +3055,7 @@ impl Workbench {
         self.busy
             || self.storage_loading
             || self.inspiration.read(cx).is_busy()
+            || self.ideas.read(cx).is_busy()
             || self.snapshot.service_active
             || value.trim().is_empty()
             || self
@@ -3648,6 +3662,8 @@ impl Render for Workbench {
             .update(cx, |notes, cx| notes.initialize(window, cx));
         let storage = self.storage_directory.clone();
         self.inspiration
+            .update(cx, |view, cx| view.set_storage(storage.as_deref(), cx));
+        self.ideas
             .update(cx, |view, cx| view.set_storage(storage.as_deref(), cx));
         let english = i18n::english();
         if self.localized_english != english {

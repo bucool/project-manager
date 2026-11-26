@@ -186,6 +186,7 @@ pub fn configure(raw: &str, source: Option<&Path>, first_run: bool) -> Result<(P
             "native-service.log",
             "previews",
             "inspiration",
+            "ideas",
         ] {
             let file = source.join(name);
             if file.try_exists()? {

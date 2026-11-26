@@ -87,7 +87,7 @@ impl GitUi {
                 if this
                     .update_in(cx, |this, window, _| {
                         if window.is_window_active()
-                            && !matches!(this.view, View::Notes | View::Inspiration)
+                            && !matches!(this.view, View::Notes | View::Inspiration | View::Ideas)
                         {
                             for path in this.git.visible.borrow().iter() {
                                 this.git.monitor.check(path, false);

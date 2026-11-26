@@ -21,6 +21,39 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Clone, Copy)]
+pub enum Collection {
+    Aesthetics,
+    Ideas,
+}
+impl Collection {
+    fn title(self) -> &'static str {
+        tr(match self {
+            Self::Aesthetics => "审美记录",
+            Self::Ideas => "灵感",
+        })
+    }
+    fn folder(self) -> &'static str {
+        match self {
+            // Keep the original location for existing aesthetic references.
+            Self::Aesthetics => "inspiration",
+            Self::Ideas => "ideas",
+        }
+    }
+    fn loading_message(self) -> &'static str {
+        match self {
+            Self::Aesthetics => "正在读取审美记录…",
+            Self::Ideas => "正在读取灵感…",
+        }
+    }
+    fn save_error(self) -> &'static str {
+        tr(match self {
+            Self::Aesthetics => "审美记录保存失败",
+            Self::Ideas => "灵感保存失败",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 enum Kind {
     #[default]
@@ -104,12 +137,20 @@ struct Event {
     message: &'static str,
     error: Option<String>,
 }
-struct Writer(mpsc::Sender<Job>);
-impl Global for Writer {}
+#[derive(Default)]
+struct Writers(Vec<mpsc::Sender<Job>>);
+impl Global for Writers {}
 pub fn flush(cx: &mut App) {
-    if let Some(writer) = cx.try_global::<Writer>() {
-        let (tx, rx) = mpsc::channel();
-        if writer.0.send(Job::Flush(tx)).is_ok() {
+    if let Some(writers) = cx.try_global::<Writers>() {
+        let pending: Vec<_> = writers
+            .0
+            .iter()
+            .filter_map(|writer| {
+                let (tx, rx) = mpsc::channel();
+                writer.send(Job::Flush(tx)).is_ok().then_some(rx)
+            })
+            .collect();
+        for rx in pending {
             let _ = rx.recv_timeout(Duration::from_secs(10));
         }
     }
@@ -379,6 +420,7 @@ enum Dialog {
     Remove(String),
 }
 pub struct Inspiration {
+    collection: Collection,
     library: Library,
     root: Option<PathBuf>,
     sender: mpsc::Sender<Job>,
@@ -400,13 +442,13 @@ pub struct Inspiration {
     pub colors: Colors,
 }
 impl Inspiration {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(collection: Collection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder(tr("标题（可选）")));
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
         let (sender, jobs) = mpsc::channel();
         let (events, receiver) = async_channel::unbounded();
         std::thread::spawn(move || worker(jobs, events));
-        cx.set_global(Writer(sender.clone()));
+        cx.default_global::<Writers>().0.push(sender.clone());
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this
@@ -449,6 +491,7 @@ impl Inspiration {
             }));
         }
         Self {
+            collection,
             library: Library::default(),
             root: None,
             sender,
@@ -477,7 +520,8 @@ impl Inspiration {
         self.busy
     }
     pub fn set_storage(&mut self, directory: Option<&str>, cx: &mut Context<Self>) {
-        let root = directory.map(|directory| PathBuf::from(directory).join("inspiration"));
+        let root =
+            directory.map(|directory| PathBuf::from(directory).join(self.collection.folder()));
         if root == self.root {
             return;
         }
@@ -487,13 +531,13 @@ impl Inspiration {
         self.dialog = None;
         self.dialog_error.clear();
         if let Some(root) = root {
-            self.send(Job::Load(root), "正在读取审美记录…", cx);
+            self.send(Job::Load(root), self.collection.loading_message(), cx);
         }
     }
     fn send(&mut self, job: Job, message: &'static str, cx: &mut Context<Self>) {
         if self.sender.send(job).is_err() {
             self.busy = false;
-            self.status = tr("审美记录保存失败").into();
+            self.status = self.collection.save_error().into();
             self.failed = true;
             if self.dialog.is_some() {
                 self.dialog_error = self.status.clone();
@@ -867,7 +911,7 @@ impl Render for Inspiration {
                                 div()
                                     .text_size(px(24.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(tr("审美记录")),
+                                    .child(self.collection.title()),
                             )
                             .child(
                                 div()
@@ -950,7 +994,11 @@ impl Render for Inspiration {
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(root) = this.root.clone() {
-                                            this.send(Job::Load(root), "正在读取审美记录…", cx);
+                                            this.send(
+                                                Job::Load(root),
+                                                this.collection.loading_message(),
+                                                cx,
+                                            );
                                         }
                                     })),
                             )
