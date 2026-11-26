@@ -906,12 +906,13 @@ impl Inspiration {
                             })),
                     ),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 if let Err(error) = crate::media_viewer::open(
                     open.target.clone(),
                     open.kind == Kind::Video,
                     thumbnail.clone(),
                     this.colors,
+                    window,
                     cx,
                 ) {
                     this.status = format!("{error:#}");

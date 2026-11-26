@@ -2,11 +2,11 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{Bounds, Pixels, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::{cell::Cell, sync::mpsc};
+use std::{cell::Cell, rc::Rc, sync::mpsc};
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Graphics::Gdi::{BeginPaint, ClientToScreen, EndPaint, PAINTSTRUCT},
         Media::MediaFoundation::*,
         System::{
             Com::{
@@ -15,7 +15,10 @@ use windows::{
             },
             LibraryLoader::GetModuleHandleW,
         },
-        UI::WindowsAndMessaging::*,
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            WindowsAndMessaging::*,
+        },
     },
     core::{HSTRING, implement, w},
 };
@@ -34,11 +37,76 @@ impl Drop for Foundation {
         }
     }
 }
-struct Child(HWND);
-impl Drop for Child {
+struct Surface {
+    state: Box<Rc<SurfaceState>>,
+}
+struct SurfaceState {
+    window: HWND,
+    owner: HWND,
+    rectangle: Cell<(i32, i32, i32, i32)>,
+    visible: Cell<bool>,
+}
+impl SurfaceState {
+    fn sync(&self) {
+        unsafe {
+            let (x, y, width, height) = self.rectangle.get();
+            if !self.visible.get()
+                || width <= 0
+                || height <= 0
+                || !IsWindowVisible(self.owner).as_bool()
+                || IsIconic(self.owner).as_bool()
+            {
+                let _ = ShowWindow(self.window, SW_HIDE);
+                return;
+            }
+            let mut origin = POINT { x, y };
+            if ClientToScreen(self.owner, &mut origin).as_bool() {
+                let _ = SetWindowPos(
+                    self.window,
+                    None,
+                    origin.x,
+                    origin.y,
+                    width,
+                    height,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                );
+            }
+        }
+    }
+}
+unsafe extern "system" fn owner_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _: usize,
+    data: usize,
+) -> LRESULT {
+    unsafe {
+        // DefSubclassProc can dispatch callbacks that close or replace the
+        // player. Keep the state alive across that reentrant dispatch.
+        let state = (data as *const Rc<SurfaceState>).as_ref().cloned();
+        let result = DefSubclassProc(hwnd, message, wparam, lparam);
+        if matches!(
+            message,
+            WM_WINDOWPOSCHANGED | WM_MOVE | WM_SIZE | WM_SHOWWINDOW | WM_DPICHANGED
+        ) {
+            if let Some(state) = state {
+                state.sync();
+            }
+        }
+        result
+    }
+}
+impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
-            let _ = DestroyWindow(self.0);
+            let _ = RemoveWindowSubclass(
+                self.state.owner,
+                Some(owner_proc),
+                self.state.window.0 as usize,
+            );
+            let _ = DestroyWindow(self.state.window);
         }
     }
 }
@@ -69,18 +137,20 @@ unsafe extern "system" fn surface_proc(
             WM_PAINT => {
                 let mut paint = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut paint);
-                let _ = EndPaint(hwnd, &paint);
-                if let Some(player) = player.as_ref() {
+                if let Some(player) = player.as_ref().cloned() {
                     let _ = player.UpdateVideo();
                 }
+                let _ = EndPaint(hwnd, &paint);
                 return LRESULT(0);
             }
             WM_SIZE => {
-                if let Some(player) = player.as_ref() {
+                if let Some(player) = player.as_ref().cloned() {
                     let _ = player.UpdateVideo();
                 }
             }
             WM_ERASEBKGND => return LRESULT(1),
+            WM_NCHITTEST => return LRESULT(HTTRANSPARENT as isize),
+            WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
             WM_NCDESTROY => {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if !player.is_null() {
@@ -103,8 +173,7 @@ pub struct Playback {
 
 pub struct Player {
     player: Option<IMFPMediaPlayer>,
-    child: Child,
-    rectangle: Cell<(i32, i32, i32, i32)>,
+    surface: Surface,
     receiver: mpsc::Receiver<Option<String>>,
     _callback: IMFPMediaPlayerCallback,
     _foundation: Foundation,
@@ -133,11 +202,14 @@ impl Player {
             };
             // Registration is process-wide; subsequent viewer sessions reuse it.
             let _ = RegisterClassW(&class);
-            let child = Child(CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+            // GPUI creates a DirectComposition target *above* its HWND children.
+            // An owned popup stays above that visual tree without appearing as a
+            // separate application window or replacing GPUI's rendering settings.
+            let surface_window = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
                 class.lpszClassName,
                 w!(""),
-                WS_CHILD | WS_CLIPSIBLINGS | WS_DISABLED,
+                WS_POPUP,
                 0,
                 0,
                 1,
@@ -146,7 +218,25 @@ impl Player {
                 None,
                 Some(instance),
                 None,
-            )?);
+            )?;
+            let surface = Surface {
+                state: Box::new(Rc::new(SurfaceState {
+                    window: surface_window,
+                    owner: parent,
+                    rectangle: Cell::new((0, 0, 0, 0)),
+                    visible: Cell::new(true),
+                })),
+            };
+            ensure!(
+                SetWindowSubclass(
+                    parent,
+                    Some(owner_proc),
+                    surface_window.0 as usize,
+                    (&*surface.state as *const Rc<SurfaceState>) as usize
+                )
+                .as_bool(),
+                "Cannot attach video surface to viewer"
+            );
             let (sender, receiver) = mpsc::channel();
             let callback: IMFPMediaPlayerCallback = Callback(sender).into();
             let mut player = None;
@@ -156,20 +246,19 @@ impl Player {
                 true,
                 MFP_OPTION_FREE_THREADED_CALLBACK,
                 &callback,
-                Some(child.0),
+                Some(surface_window),
                 Some(&mut player),
             )?;
             let player = player.context("Media Foundation returned no player")?;
             let _ = player.SetAspectRatioMode(MFVideoARMode_PreservePicture.0 as u32);
             SetWindowLongPtrW(
-                child.0,
+                surface_window,
                 GWLP_USERDATA,
                 Box::into_raw(Box::new(player.clone())) as isize,
             );
             Ok(Self {
                 player: Some(player),
-                child,
-                rectangle: Cell::new((0, 0, 0, 0)),
+                surface,
                 receiver,
                 _callback: callback,
                 _foundation: foundation,
@@ -184,18 +273,8 @@ impl Player {
             (f32::from(bounds.size.width) * scale).round().max(1.) as i32,
             (f32::from(bounds.size.height) * scale).round().max(1.) as i32,
         );
-        if self.rectangle.replace(rectangle) != rectangle {
-            unsafe {
-                let _ = SetWindowPos(
-                    self.child.0,
-                    None,
-                    rectangle.0,
-                    rectangle.1,
-                    rectangle.2,
-                    rectangle.3,
-                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-                );
-            }
+        if self.surface.state.rectangle.replace(rectangle) != rectangle {
+            self.surface.state.sync();
         }
     }
     pub fn toggle(&self) -> Result<()> {
@@ -216,7 +295,8 @@ impl Player {
             }
         }
         unsafe {
-            let _ = ShowWindow(self.child.0, SW_HIDE);
+            self.surface.state.visible.set(false);
+            let _ = ShowWindow(self.surface.state.window, SW_HIDE);
         }
     }
     pub fn seek(&self, seconds: f64) -> Result<()> {
@@ -275,6 +355,6 @@ impl Drop for Player {
                 let _ = player.Shutdown();
             }
         }
-        // Child drops next, releasing its extra COM reference before MFShutdown.
+        // Surface drops next, releasing its extra COM reference before MFShutdown.
     }
 }

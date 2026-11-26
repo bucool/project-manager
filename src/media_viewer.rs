@@ -1,5 +1,7 @@
 //! Reusable application window for native image viewing and video playback.
 use crate::{i18n::tr, theme::Colors};
+#[path = "media_window.rs"]
+mod placement;
 use anyhow::Result;
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -39,8 +41,10 @@ pub fn open(
     video: bool,
     thumbnail: Option<PathBuf>,
     colors: Colors,
+    source_window: &Window,
     cx: &mut App,
 ) -> Result<()> {
+    let placement = placement::Placement::new(source_window, cx);
     if let Some(slot) = cx.try_global::<ViewerSlot>().cloned() {
         if let (Some(handle), Some(view)) = (slot.window, slot.view.and_then(|view| view.upgrade()))
         {
@@ -48,6 +52,7 @@ pub fn open(
             let thumb = thumbnail.clone();
             if handle
                 .update(cx, |_, window, cx| {
+                    placement.apply(window, false);
                     view.update(cx, |view, cx| {
                         view.load(source, video, thumb, colors, window, cx)
                     });
@@ -69,10 +74,10 @@ pub fn open(
         KeyBinding::new("left", SeekBack, Some("MediaViewer")),
         KeyBinding::new("right", SeekForward, Some("MediaViewer")),
     ]);
-    let bounds = Bounds::centered(None, size(px(1040.), px(780.)), cx);
     cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(WindowBounds::Windowed(placement.bounds)),
+            display_id: placement.display_id,
             window_min_size: Some(size(px(540.), px(400.))),
             titlebar: Some(TitlebarOptions {
                 title: Some(tr("媒体查看器").into()),
@@ -81,6 +86,7 @@ pub fn open(
             ..Default::default()
         },
         move |window, cx| {
+            placement.apply(window, true);
             let view = cx.new(|cx| Viewer::new(window, cx));
             cx.set_global(ViewerSlot {
                 window: Some(window.window_handle()),
