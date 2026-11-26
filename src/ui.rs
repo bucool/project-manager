@@ -32,12 +32,13 @@ enum View {
     Favorites,
     Running,
     Notes,
+    Inspiration,
     Directory(String),
 }
 impl View {
     fn includes(&self, project: &Project) -> bool {
         match self {
-            Self::Notes => false,
+            Self::Notes | Self::Inspiration => false,
             Self::All => true,
             Self::Favorites => project.favorite,
             Self::Running => project.status == "running",
@@ -48,6 +49,7 @@ impl View {
     fn label(&self) -> String {
         match self {
             Self::Notes => tr("笔记").into(),
+            Self::Inspiration => tr("审美记录").into(),
             Self::All => tr("项目库").into(),
             Self::Favorites => tr("我的收藏").into(),
             Self::Running => tr("正在运行").into(),
@@ -145,6 +147,7 @@ impl SortOrder {
 pub struct Workbench {
     git: git_ui::GitUi,
     notes: Entity<crate::notes::Notes>,
+    inspiration: Entity<crate::inspiration::Inspiration>,
     backend: Backend,
     monitor: Monitor,
     discovery: Discovery,
@@ -540,13 +543,16 @@ impl Workbench {
         })
         .detach();
         let notes = cx.new(|cx| crate::notes::Notes::new(window, cx));
+        let inspiration = cx.new(|cx| crate::inspiration::Inspiration::new(window, cx));
         let git = git_ui::GitUi::new(window, cx);
         let notes_subscription = cx.observe(&notes, |_, _, cx| cx.notify());
+        let inspiration_subscription = cx.observe(&inspiration, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus);
         Self {
             git,
             notes,
+            inspiration,
             backend,
             monitor,
             discovery: Discovery::default(),
@@ -593,7 +599,12 @@ impl Workbench {
             error: false,
             show_logs: false,
             focus,
-            _subscriptions: vec![notes_subscription, subscription, storage_subscription],
+            _subscriptions: vec![
+                notes_subscription,
+                inspiration_subscription,
+                subscription,
+                storage_subscription,
+            ],
         }
     }
     fn receive(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -987,6 +998,7 @@ impl Workbench {
                     (View::Favorites, tr("我的收藏"), IconName::Star, favorite),
                     (View::Running, tr("正在运行"), IconName::ExternalLink, running),
                     (View::Notes, tr("笔记"), IconName::Folder, self.notes.read(cx).count()),
+                    (View::Inspiration, tr("审美记录"), IconName::Palette, self.inspiration.read(cx).count()),
                 ]
                 .into_iter()
                 .enumerate()
@@ -2114,6 +2126,11 @@ impl Workbench {
     }
 
     fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.view == View::Inspiration {
+            let colors = self.colors();
+            self.inspiration.update(cx, |view, _| view.colors = colors);
+            return self.inspiration.clone().into_any_element();
+        }
         if self.view == View::Notes {
             let colors = self.colors();
             self.notes.update(cx, |notes, _| notes.colors = colors);
@@ -3024,6 +3041,7 @@ impl Workbench {
         let value = self.storage_input.read(cx).value();
         self.busy
             || self.storage_loading
+            || self.inspiration.read(cx).is_busy()
             || self.snapshot.service_active
             || value.trim().is_empty()
             || self
@@ -3628,6 +3646,9 @@ impl Render for Workbench {
         self.git.begin_frame();
         self.notes
             .update(cx, |notes, cx| notes.initialize(window, cx));
+        let storage = self.storage_directory.clone();
+        self.inspiration
+            .update(cx, |view, cx| view.set_storage(storage.as_deref(), cx));
         let english = i18n::english();
         if self.localized_english != english {
             self.search.update(cx, |input, cx| {

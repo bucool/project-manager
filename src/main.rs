@@ -3,6 +3,7 @@ mod assets;
 mod backend;
 mod dev_servers;
 mod i18n;
+mod inspiration;
 mod notes;
 mod preview_cache;
 mod project_git;
@@ -75,6 +76,7 @@ fn main() {
                 #[cfg(windows)]
                 tray::shutdown(_cx);
                 crate::notes::flush(_cx);
+                crate::inspiration::flush(_cx);
                 cleanup.shutdown();
                 async {}
             })

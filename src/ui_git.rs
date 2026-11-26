@@ -86,7 +86,9 @@ impl GitUi {
                 Timer::after(Duration::from_secs(5)).await;
                 if this
                     .update_in(cx, |this, window, _| {
-                        if window.is_window_active() && this.view != View::Notes {
+                        if window.is_window_active()
+                            && !matches!(this.view, View::Notes | View::Inspiration)
+                        {
                             for path in this.git.visible.borrow().iter() {
                                 this.git.monitor.check(path, false);
                             }

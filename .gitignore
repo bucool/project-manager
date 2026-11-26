@@ -35,3 +35,6 @@ notes/
 notes.json
 notes-location.json
 notes-images/
+
+# Private aesthetic references, local media paths and thumbnails.
+inspiration/

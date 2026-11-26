@@ -30,6 +30,8 @@ Built with **Rust + GPUI**. Previews use the system **Microsoft Edge WebView2 Ru
 
 Notes are available from the sidebar, with tabs, automatic saving, Markdown rendered directly in the note, with in-place paragraph editing. Pasted images (Ctrl+V) appear in the document at the cursor position and are stored locally. Change the notes folder in **Settings → Notes**; existing notes and images are moved to the new folder after verification. Notes stay local.
 
+**Inspiration** in the sidebar collects links, images, and videos in separate tabs. Add links or select multiple media files, then click a reference to open it with your default browser, image viewer, or video player. References and image thumbnails stay in your chosen data folder; media files remain in their original locations. Removing a reference does not delete its source file.
+
 ## Download
 
 Download the Windows x64 portable ZIP from [Releases](https://github.com/bucool/project-manager/releases/latest), extract the **entire archive**, and open `project-manager.exe`. New builds include Node.js but no bundled browser or Playwright. Preview capture requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), already present on most Windows PCs. Individual managed projects may still need their own package managers and dependencies. The interface defaults to your Windows display language: Simplified Chinese for Chinese systems, English otherwise. Choose **Follow system**, **简体中文**, or **English** in **Settings → General → Interface language**. Changes preview immediately; save to keep your choice.

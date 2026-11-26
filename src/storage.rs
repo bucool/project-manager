@@ -185,6 +185,7 @@ pub fn configure(raw: &str, source: Option<&Path>, first_run: bool) -> Result<(P
             "dependencies.json",
             "native-service.log",
             "previews",
+            "inspiration",
         ] {
             let file = source.join(name);
             if file.try_exists()? {

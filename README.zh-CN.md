@@ -30,6 +30,8 @@ Windows 原生本地项目管理工具。通过缓存预览浏览网页应用、
 
 侧栏提供笔记入口，支持多标签、新建笔记、修改自动保存、正文直接渲染 Markdown，点击段落原地编辑；Ctrl+V 会在光标处插入并显示本地图片。在**设置 → 笔记**中更换保存目录，已有笔记及图片会迁移到新目录，核对成功后删除旧文件。笔记仅保存在本机。
 
+侧栏的**审美记录**按链接、图片、视频分成三个标签。可添加链接或批量选择媒体文件，点击记录后使用系统默认浏览器、看图软件或播放器打开。记录和图片缩略图保存在自选数据目录，媒体文件保留在原位置；移除记录不会删除源文件。
+
 ## 下载
 
 从 [Releases](https://github.com/bucool/project-manager/releases/latest) 下载 Windows x64 便携 ZIP，**完整解压**后运行 `project-manager.exe`。新构建的便携包包含 Node.js，不再附带浏览器或 Playwright。截图需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，多数 Windows 电脑已安装。被管理的项目仍可能需要自行安装对应的包管理器和依赖。界面默认跟随 Windows 显示语言：中文系统使用简体中文，其他语言使用 English。可在**设置 → 常规 → 界面语言**中选择**跟随系统、简体中文、English**，点击即时预览，保存后记住选择。
