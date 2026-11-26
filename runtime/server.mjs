@@ -43,6 +43,7 @@ let previews = await readJson(path.join(dataDir, 'previews.json'), {});
 let projects = [];
 let initialScanError = null;
 const sessions = new Map();
+const editorKey = id => `editor:${id}`;
 const dependencyFile = path.join(dataDir, 'dependencies.json');
 const dependencyState = new Map(Object.entries(await readJson(dependencyFile, {})).map(([id, state]) => [id,
   state.state === 'installing' ? { ...state, state: 'error', error: '上次依赖安装已中断，请重试。' } : state,
@@ -110,7 +111,7 @@ async function dependencyCommand(project) {
 
 async function installDependencies(project) {
   if (installJobs.has(project.id)) return;
-  if (['starting', 'running', 'stopping'].includes(sessions.get(project.id)?.status)
+  if ([project.id, editorKey(project.id)].some(key => ['starting', 'running', 'stopping'].includes(sessions.get(key)?.status))
       || ['queued', 'capturing'].includes(captureState.get(project.id))) {
     throw new Error('请先停止运行或等待预览获取完成，再安装依赖。');
   }
@@ -187,17 +188,21 @@ async function scan(roots = settings.roots) {
       if (!isWeb) continue;
       const stats = await fs.stat(directory);
       const classification = await detectProjectTypes(directory, pkg, files);
+      const hasLevelEditor = Boolean(pkg?.scripts?.['dev:editor']) && files.includes('editor.html')
+        && ((classification.gameEngines.includes('PixiJS') && files.includes('level-editor'))
+          || (classification.gameEngines.includes('Three.js') && files.includes('scene-editor')));
       let modified = stats.mtimeMs;
       const createdAt = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? stats.birthtimeMs : null;
       for (const name of ['src', 'index.html', 'package.json']) {
         try { modified = Math.max(modified, (await fs.stat(path.join(directory, name))).mtimeMs); } catch {}
       }
-      next.push({ id: hash(directory.toLowerCase()), name: entry.name, path: directory, root: absolute, classification, modified, createdAt, script: pkg?.scripts?.['dev:web'] ? 'dev:web' : pkg?.scripts?.dev ? 'dev' : null, dependenciesInstalled: await dependenciesPresent(directory, pkg) });
+      next.push({ id: hash(directory.toLowerCase()), name: entry.name, path: directory, root: absolute, classification, hasLevelEditor, modified, createdAt, script: pkg?.scripts?.['dev:web'] ? 'dev:web' : pkg?.scripts?.dev ? 'dev' : null, dependenciesInstalled: await dependenciesPresent(directory, pkg) });
     }
   }
   const nextIds = new Set(next.map(p => p.id));
   for (let i = queue.length - 1; i >= 0; i--) if (!nextIds.has(queue[i])) { captureState.delete(queue[i]); queue.splice(i, 1); }
-  await Promise.all([...sessions.keys()].filter(id => !nextIds.has(id)).map(stopProject));
+  const validSessions = new Set(next.flatMap(p => p.hasLevelEditor ? [p.id, editorKey(p.id)] : [p.id]));
+  await Promise.all([...sessions.keys()].filter(key => !validSessions.has(key)).map(stopProject));
   projects = next.sort((a, b) => b.modified - a.modified);
   settings.roots = directories;
   settings.root = directories[0] || '';
@@ -209,41 +214,47 @@ async function scan(roots = settings.roots) {
 function snapshot() {
   return { settings, cachePath: previewDir, queueLength: queue.length + Number(working), projects: projects.map(p => {
     const session = sessions.get(p.id);
+    const editor = sessions.get(editorKey(p.id));
     const dependency = dependencyState.get(p.id);
     const installState = installJobs.has(p.id) ? 'installing' : dependency?.state || 'idle';
     const categories = projectCategories(p.classification, settings.gameEnginesOnly);
-    return { ...p, engine: categories[0], categories, dependenciesInstalled: p.dependenciesInstalled && !['installing', 'error'].includes(installState), installState, installError: dependency?.error || null, favorite: settings.favorites.includes(p.id), status: session?.status || 'idle', url: session?.url || null, lanUrls: session?.status === 'running' ? session.lan?.urls() || [] : [], lanError: session?.lanError || null, error: session?.error || null, logs: installState === 'installing' || installState === 'error' ? dependency?.logs || '' : session?.logs || dependency?.logs || '', capture: captureState.get(p.id) || 'idle', preview: previews[p.id]?.time ? `/previews/${p.id}.jpg?v=${previews[p.id].time}` : null, capturedAt: previews[p.id]?.time || null, captureError: previews[p.id]?.error || null };
+    return { ...p, editorUrl: editor?.status === 'running' ? editor.url : null, engine: categories[0], categories, dependenciesInstalled: p.dependenciesInstalled && !['installing', 'error'].includes(installState), installState, installError: dependency?.error || null, favorite: settings.favorites.includes(p.id), status: session?.status || 'idle', url: session?.url || null, lanUrls: session?.status === 'running' ? session.lan?.urls() || [] : [], lanError: session?.lanError || null, error: session?.error || null, logs: installState === 'installing' || installState === 'error' ? dependency?.logs || '' : session?.logs || dependency?.logs || '', capture: captureState.get(p.id) || 'idle', preview: previews[p.id]?.time ? `/previews/${p.id}.jpg?v=${previews[p.id].time}` : null, capturedAt: previews[p.id]?.time || null, captureError: previews[p.id]?.error || null };
   }) };
 }
 
 async function startProject(project, owner = 'user', portAttempt = 0) {
-  let session = sessions.get(project.id);
+  const editor = owner === 'editor';
+  const key = editor ? editorKey(project.id) : project.id;
+  if (editor && !project.hasLevelEditor) throw new Error('项目没有可启动的关卡编辑器');
+  let session = sessions.get(key);
   if (session?.stopping) await session.stopping;
   if (session && ['starting', 'running'].includes(session.status)) {
     if (owner === 'user') session.owner = 'user';
     await session.ready;
-    session = sessions.get(project.id) || session;
+    session = sessions.get(key) || session;
     if (session.status === 'running' && await stillOwnsProjectUrl(session)) {
       await enableLanPreview(session);
       return session;
     }
     // A former port may now belong to a different project. Stop only our own
     // launcher tree and start afresh instead of opening its stale URL.
-    await stopProject(project.id);
+    await stopProject(key);
   }
   if (installJobs.has(project.id)) throw new Error('正在安装依赖，请稍候。');
   if (!project.dependenciesInstalled || dependencyState.get(project.id)?.state === 'error') throw new Error('项目尚未安装依赖，请先点击“安装依赖”。');
   session = { status: 'starting', logs: '', url: null, error: null, child: null, owner };
-  sessions.set(project.id, session);
+  sessions.set(key, session);
   session.ready = (async () => {
-    if (project.script) {
+    const script = editor ? 'dev:editor' : project.script;
+    if (script) {
       const npmCli = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
       session.launch = await prepareProjectLaunch(project);
+      if (editor) session.launch.env.GPM_LEVEL_EDITOR = '1';
       if (session.status !== 'starting') {
         session.launch.release();
         throw new Error('启动已取消');
       }
-      session.child = spawn(process.execPath, [npmCli, '--prefix', project.path, '--node-options', session.launch.env.NODE_OPTIONS, 'run', project.script], {
+      session.child = spawn(process.execPath, [npmCli, '--prefix', project.path, '--node-options', session.launch.env.NODE_OPTIONS, 'run', script], {
         cwd: project.path, env: session.launch.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
       });
     } else {
@@ -262,7 +273,7 @@ async function startProject(project, owner = 'user', portAttempt = 0) {
     while (Date.now() < deadline) {
       if (session.status === 'error') throw new Error(session.error);
       if (['idle', 'stopping'].includes(session.status)) throw new Error('启动已取消');
-      const address = await readyProjectUrl(session);
+      const address = await readyProjectUrl(session, editor ? '/editor.html' : null);
       if (address && session.status === 'starting') {
         session.url = address;
         session.status = 'running';
@@ -421,10 +432,12 @@ const server = http.createServer(async (req, res) => {
         projects.filter(p => (!root || rootKey(p.root) === rootKey(root)) && (data.force || !previews[p.id]?.time)).forEach(p => enqueue(p.id, !!data.force));
         return json(res, 202, snapshot());
       }
-      const match = url.pathname.match(/^\/api\/projects\/([a-f0-9]{16})\/(start|stop|capture|folder|install)$/);
+      const match = url.pathname.match(/^\/api\/projects\/([a-f0-9]{16})\/(start|stop|start-editor|stop-editor|capture|folder|install)$/);
       if (match) {
         const project = getProject(match[1]);
         if (match[2] === 'install') await installDependencies(project);
+        if (match[2] === 'start-editor') await startProject(project, 'editor');
+        if (match[2] === 'stop-editor') await stopProject(editorKey(project.id));
         if (match[2] === 'start') {
           await startProject(project);
           // Refresh in the background after a manual launch, including existing cached previews.

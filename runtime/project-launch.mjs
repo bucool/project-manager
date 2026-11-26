@@ -94,7 +94,7 @@ export async function stillOwnsProjectUrl(session) {
   return owns(new URL(session.url), await projectListeners(session));
 }
 
-export async function readyProjectUrl(session) {
+export async function readyProjectUrl(session, entryPath = null) {
   const ownership = await projectListeners(session);
   if (!ownership.alive) throw new Error('项目启动进程已退出，请查看运行日志。');
   if (ownership.listeners.length && ownership.listeners.every(listener => ownership.blockedPorts?.includes(listener.port))) {
@@ -122,7 +122,8 @@ export async function readyProjectUrl(session) {
       } catch { /* Ignore unsupported scoped addresses. */ }
     }
   }
-  for (const url of [...candidates.values()].slice(0, 12)) {
+  for (const candidate of [...candidates.values()].slice(0, 12)) {
+    const url = entryPath ? new URL(entryPath, candidate) : candidate;
     if (session.status !== 'starting') return null;
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(1200), redirect: 'manual' });

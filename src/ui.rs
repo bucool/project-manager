@@ -1,5 +1,5 @@
 use crate::assets::ActionIcon;
-use crate::backend::{self, Backend, Event, Project, Request, Snapshot, SortOrder};
+use crate::backend::{self, Backend, Event, LaunchTarget, Project, Request, Snapshot, SortOrder};
 use crate::dev_servers::{self, DevServer, Discovery, Monitor};
 use crate::i18n::{self, Language, tr};
 use crate::preview_cache::{self, PreviewCache, PreviewSource};
@@ -116,6 +116,7 @@ struct RunningEntry {
     server: DevServer,
     project: Option<Project>,
     owned: bool,
+    editor: bool,
 }
 
 impl RunningEntry {
@@ -788,7 +789,7 @@ impl Workbench {
     fn send(
         &mut self,
         operations: Vec<(String, serde_json::Value)>,
-        launch: Option<String>,
+        launch: Option<LaunchTarget>,
         message: &str,
         cx: &mut Context<Self>,
     ) {
@@ -826,8 +827,20 @@ impl Workbench {
             "start" => (
                 format!("projects/{}/start", p.id),
                 json!({}),
-                Some(p.id.clone()),
+                Some(LaunchTarget::Game(p.id.clone())),
                 tr("项目已在独立窗口打开"),
+            ),
+            "start-editor" => (
+                format!("projects/{}/start-editor", p.id),
+                json!({}),
+                Some(LaunchTarget::Editor(p.id.clone())),
+                tr("关卡编辑器已打开"),
+            ),
+            "stop-editor" => (
+                format!("projects/{}/stop-editor", p.id),
+                json!({}),
+                None,
+                tr("关卡编辑器已停止"),
             ),
             "stop" => (
                 format!("projects/{}/stop", p.id),
@@ -855,7 +868,11 @@ impl Workbench {
     fn stop_running(&mut self, entry: &RunningEntry, cx: &mut Context<Self>) {
         if entry.owned {
             if let Some(project) = &entry.project {
-                self.action(project, "stop", cx);
+                self.action(
+                    project,
+                    if entry.editor { "stop-editor" } else { "stop" },
+                    cx,
+                );
             }
             return;
         }
@@ -1348,7 +1365,23 @@ impl Workbench {
                             colors.muted,
                         )
                         .truncate(),
-                    ),
+                    )
+                    .when(p.has_level_editor, |row| {
+                        let project = p.clone();
+                        row.child(
+                            Button::new(SharedString::from(format!("level-editor-{}", p.id)))
+                                .icon(icon(ActionIcon::Edit, 14.))
+                                .label(tr("关卡编辑器"))
+                                .small()
+                                .ml_auto()
+                                .flex_shrink_0()
+                                .tooltip(tr("启动关卡编辑器"))
+                                .disabled(self.busy || !p.dependencies_installed || installing)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.action(&project, "start-editor", cx)
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1578,7 +1611,15 @@ impl Workbench {
             .snapshot
             .projects
             .iter()
-            .filter(|project| project.status == "running")
+            .flat_map(|project| {
+                let game = project
+                    .url
+                    .as_deref()
+                    .filter(|_| project.status == "running");
+                [(false, game), (true, project.editor_url.as_deref())]
+                    .into_iter()
+                    .filter_map(move |(editor, url)| Some((project, editor, url?)))
+            })
             .collect();
         let mut entries = self
             .discovery
@@ -1587,14 +1628,10 @@ impl Workbench {
             .map(|server| {
                 let owned = managed
                     .iter()
-                    .find(|project| {
-                        project
-                            .url
-                            .as_deref()
-                            .is_some_and(|url| server.matches_url(url))
-                    })
+                    .find(|(_, _, url)| server.matches_url(url))
                     .copied();
                 let project = owned
+                    .map(|(project, _, _)| project)
                     .or_else(|| {
                         server.directory.as_deref().and_then(|directory| {
                             let directory = root_key(directory);
@@ -1613,25 +1650,26 @@ impl Workbench {
                     })
                     .cloned();
                 let mut server = server.clone();
-                if let Some(url) = owned.and_then(|project| project.url.clone()) {
-                    server.url = url;
+                if let Some((_, _, url)) = owned {
+                    server.url = url.to_owned();
                 }
                 RunningEntry {
                     server,
                     project,
                     owned: owned.is_some(),
+                    editor: owned.is_some_and(|(_, editor, _)| editor),
                 }
             })
             .collect::<Vec<_>>();
         // Keep managed projects visible while native discovery is pending or unavailable.
-        for project in managed {
-            if entries.iter().any(|entry| {
-                entry.owned && entry.project.as_ref().is_some_and(|p| p.id == project.id)
-            }) {
+        for (project, editor, url) in managed {
+            if entries
+                .iter()
+                .any(|entry| entry.owned && entry.server.url == url)
+            {
                 continue;
             }
-            let url = project.url.clone().unwrap_or_default();
-            let parsed = url::Url::parse(&url).ok();
+            let parsed = url::Url::parse(url).ok();
             entries.push(RunningEntry {
                 server: DevServer {
                     pid: 0,
@@ -1640,7 +1678,7 @@ impl Workbench {
                         .and_then(|url| url.port_or_known_default())
                         .unwrap_or(0),
                     addresses: vec![],
-                    url,
+                    url: url.to_owned(),
                     name: project.name.clone(),
                     directory: Some(project.path.clone()),
                     kind: project.engine.clone(),
@@ -1648,6 +1686,7 @@ impl Workbench {
                 },
                 project: Some(project.clone()),
                 owned: true,
+                editor,
             });
         }
         entries.sort_by(|a, b| {
@@ -1927,6 +1966,7 @@ impl Workbench {
         let lan_address = entry
             .project
             .as_ref()
+            .filter(|_| !entry.editor)
             .and_then(|p| p.lan_urls.first())
             .cloned();
         let endpoint = entry
@@ -1998,6 +2038,9 @@ impl Workbench {
                             .gap_2()
                             .mt_1()
                             .child(text(entry.server.kind.clone(), 12., colors.accent))
+                            .when(entry.editor, |row| {
+                                row.child(text(tr("关卡编辑器"), 12., colors.accent))
+                            })
                             .child(text(
                                 if entry.owned {
                                     tr("工作台启动")

@@ -79,6 +79,9 @@ pub struct Project {
     pub status: String,
     pub url: Option<String>,
     #[serde(default)]
+    pub has_level_editor: bool,
+    pub editor_url: Option<String>,
+    #[serde(default)]
     pub lan_urls: Vec<String>,
     #[serde(default)]
     pub lan_error: Option<String>,
@@ -156,6 +159,7 @@ impl Snapshot {
         self.queue_length > 0
             || self.projects.iter().any(|p| {
                 p.install_state == "installing"
+                    || p.editor_url.is_some()
                     || matches!(p.status.as_str(), "starting" | "running" | "stopping")
             })
     }
@@ -168,6 +172,7 @@ impl Snapshot {
         for project in &mut snapshot.projects {
             project.status = "idle".into();
             project.url = None;
+            project.editor_url = None;
             project.lan_urls.clear();
             project.lan_error = None;
             if project.install_state == "installing" {
@@ -183,9 +188,14 @@ impl Snapshot {
     }
 }
 
+pub enum LaunchTarget {
+    Game(String),
+    Editor(String),
+}
+
 pub struct Request {
     pub operations: Vec<(String, Value)>,
-    pub launch: Option<String>,
+    pub launch: Option<LaunchTarget>,
     pub message: String,
 }
 pub enum Event {
@@ -422,15 +432,21 @@ impl Backend {
                                 request(&agent, address, &endpoint, Some(value))?;
                             }
                             let snapshot = request(&agent, address, "projects", None)?;
-                            if let Some(id) = command.launch {
-                                if let Some(url) = snapshot
-                                    .projects
-                                    .iter()
-                                    .find(|p| p.id == id && p.status == "running")
-                                    .and_then(|p| p.url.as_ref())
-                                {
-                                    open(url)?;
+                            if let Some(target) = command.launch {
+                                let url = match target {
+                                    LaunchTarget::Game(id) => snapshot
+                                        .projects
+                                        .iter()
+                                        .find(|p| p.id == id && p.status == "running")
+                                        .and_then(|p| p.url.as_deref()),
+                                    LaunchTarget::Editor(id) => snapshot
+                                        .projects
+                                        .iter()
+                                        .find(|p| p.id == id)
+                                        .and_then(|p| p.editor_url.as_deref()),
                                 }
+                                .context("启动进程未返回可打开的地址")?;
+                                open(url)?;
                             }
                             worker.settle(&mut base, snapshot)
                         })();
